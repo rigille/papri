@@ -159,6 +159,51 @@ int rope_line_start(const Rope *rope, uint32_t line_index, uint32_t *offset);
 int rope_line_of_offset(const Rope *rope, uint32_t offset,
                         uint32_t *line_index);
 
+/* Free exactly the nodes the retiring version holds and the survivor does
+ * not — the runtime half of the reclamation story.
+ *
+ * Shares say WHEN freeing is permitted: a node may go back only once every
+ * share of it has rejoined to the full share. They are ghost state, so they
+ * cannot say WHICH nodes those are. This walk is what finds them, and the
+ * obligation connecting the two is that it returns exactly the nodes whose
+ * shares have rejoined.
+ *
+ * It descends both versions by height, pruning wherever a node is reached by
+ * both — pointer identity, so a shared subtree costs one comparison however
+ * large it is. Positions are not compared, because drop and concat shift a
+ * shared child to a different index; only identity at a common height is
+ * trusted.
+ *
+ * Soundness rests on each version being a TREE — no node twice within one
+ * version — so that every node is reached, and freed, at most once.
+ *
+ * Both sides are SETS of roots, not single versions. Retirement passes one
+ * of each; an edit passes its discarded intermediates as dead and the
+ * version it started from plus the one it produced as live, which is how
+ * the garbage a single edit leaves behind gets collected at all — that
+ * garbage is reachable from no version, so version-to-version diffing alone
+ * would never see it.
+ *
+ * requires: node_pool(pool, live, residual); every rope in `dead` is one
+ *           nothing outside this call still holds a share of; every rope in
+ *           `live` must survive.
+ * ensures:  node_pool(pool, live', residual) with every node reachable from
+ *           some rope in `dead` and from none in `live` returned to the
+ *           pool, each freed exactly once, and the result is 1; or the
+ *           difference was too wide to walk within bounded memory and the
+ *           result is 0. Every rope in `live` is untouched and readable.
+ */
+int rope_free_difference(Pool *pool,
+                         const Rope *dead, uint32_t dead_count,
+                         const Rope *live, uint32_t live_count);
+
+/* requires: rope(rope, bytes, share).
+ * ensures:  rope(rope, bytes, share); the result is the total pool memory
+ *           the version occupies, counting each node once. For tests. No
+ *           memory is written.
+ */
+size_t rope_allocated_bytes(const Rope *rope);
+
 /* requires: rope(rope, bytes, share).
  * ensures:  rope(rope, bytes, share); the result is 1 when every structural
  *           invariant holds — leaves aligned, child counts within bounds,

@@ -1537,7 +1537,10 @@ int rope_slice(Pool *pool, const Rope *rope, uint32_t start, uint32_t end,
 {
     Rope     head;
     Rope     tail;
-    Rope     discarded;
+    Rope     trailing;
+    Rope     leading;
+    Rope     scrap[3];
+    Rope     survivors[2];
     uint32_t total;
     int      outcome;
 
@@ -1549,14 +1552,316 @@ int rope_slice(Pool *pool, const Rope *rope, uint32_t start, uint32_t end,
         return 0;
     }
 
-    outcome = rope_split(pool, rope, end, &head, &discarded);
+    outcome = rope_split(pool, rope, end, &head, &trailing);
     if (outcome == 0) {
         return 0;
     }
-    outcome = rope_split(pool, &head, start, &discarded, &tail);
+    outcome = rope_split(pool, &head, start, &leading, &tail);
     if (outcome == 0) {
         return 0;
     }
     memcpy(slice, &tail, sizeof(Rope));
+
+    /* Two splits to keep one third of the result: the other two thirds, and
+     * the intermediate they were cut from, are garbage the moment we
+     * return. Everything they share is shared with `rope`, which survives,
+     * so the walk prunes it and frees only the spines this call invented.
+     */
+    memcpy(&scrap[0], &head, sizeof(Rope));
+    memcpy(&scrap[1], &trailing, sizeof(Rope));
+    memcpy(&scrap[2], &leading, sizeof(Rope));
+    memcpy(&survivors[0], rope, sizeof(Rope));
+    memcpy(&survivors[1], slice, sizeof(Rope));
+    rope_free_difference(pool, scrap, 3, survivors, 2);
     return 1;
+}
+
+/* Both frontiers are bounded. A single edit's difference is a spine, so a
+ * couple of hundred entries is generous; exceeding it means refusing to free
+ * rather than risking a wrong answer. */
+#define FRONTIER_CAPACITY 2048
+
+typedef struct Frontier {
+    void    *nodes[FRONTIER_CAPACITY];
+    uint32_t count;
+} Frontier;
+
+/* requires: *frontier readable.
+ * ensures:  the result is 1 when that node is in it. No memory is written.
+ */
+static int frontier_holds(const Frontier *frontier, const void *node)
+{
+    uint32_t count;
+    uint32_t index;
+    const void *candidate;
+
+    count = frontier->count;
+    index = 0;
+    while (index < count) {
+        candidate = frontier->nodes[index];
+        if (candidate == node) {
+            return 1;
+        }
+        index = index + 1;
+    }
+    return 0;
+}
+
+/* Appending is idempotent. Two dead roots may share a subtree, and a node
+ * reached twice must still be freed once.
+ *
+ * requires: *frontier writable.
+ * ensures:  *frontier holds that node, and the result is 1; or it was full,
+ *           *frontier is unchanged, and the result is 0.
+ */
+static int frontier_append(Frontier *frontier, void *node)
+{
+    uint32_t count;
+    int      present;
+
+    present = frontier_holds(frontier, node);
+    if (present == 1) {
+        return 1;
+    }
+    count = frontier->count;
+    if (count >= FRONTIER_CAPACITY) {
+        return 0;
+    }
+    frontier->nodes[count] = node;
+    frontier->count = count + 1;
+    return 1;
+}
+
+/* requires: node_pool(pool, live, residual); holds the full share of the
+ *           subtree root at `node`, which sits at `height`.
+ * ensures:  that one node is returned to the pool. Its children are not
+ *           touched; the caller has already collected them.
+ */
+static void free_one(Pool *pool, void *node, uint32_t height)
+{
+    if (height == 0) {
+        pool_free(pool, node, ROPE_LEAF_BYTES);
+        return;
+    }
+    pool_free(pool, node, sizeof(RopeNode));
+}
+
+/* requires: holds a read share of the subtree at `node`, at `height` > 0;
+ *           *frontier writable.
+ * ensures:  every child of that node is appended and the result is 1; or the
+ *           frontier filled up and the result is 0.
+ */
+static int push_children(const void *node, uint32_t height,
+                         Frontier *frontier)
+{
+    const RopeNode *source;
+    uint32_t        count;
+    uint32_t        index;
+    void           *child;
+    int             ok;
+
+    if (height == 0) {
+        return 1;
+    }
+
+    source = node;
+    count = source->child_count;
+    index = 0;
+    while (index < count) {
+        child = source->children[index];
+        ok = frontier_append(frontier, child);
+        if (ok == 0) {
+            return 0;
+        }
+        index = index + 1;
+    }
+    return 1;
+}
+
+/* requires: as rope.h.
+ * ensures:  as rope.h.
+ */
+int rope_free_difference(Pool *pool,
+                         const Rope *dead_set, uint32_t dead_count,
+                         const Rope *live_set, uint32_t live_count)
+{
+    Frontier dead;
+    Frontier live;
+    Frontier dead_next;
+    Frontier live_next;
+    void    *root;
+    void    *node;
+    uint32_t height;
+    uint32_t candidate;
+    uint32_t index;
+    uint32_t count;
+    int      ok;
+    int      shared;
+
+    /* Start above every root, so each is seeded when the descent reaches
+     * its own height. */
+    height = 0;
+    index = 0;
+    while (index < dead_count) {
+        root = dead_set[index].root;
+        if (root != NULL) {
+            candidate = dead_set[index].height;
+            if (candidate > height) {
+                height = candidate;
+            }
+        }
+        index = index + 1;
+    }
+    index = 0;
+    while (index < live_count) {
+        root = live_set[index].root;
+        if (root != NULL) {
+            candidate = live_set[index].height;
+            if (candidate > height) {
+                height = candidate;
+            }
+        }
+        index = index + 1;
+    }
+
+    dead.count = 0;
+    live.count = 0;
+
+    while (1) {
+        index = 0;
+        while (index < dead_count) {
+            root = dead_set[index].root;
+            if (root != NULL) {
+                candidate = dead_set[index].height;
+                if (candidate == height) {
+                    ok = frontier_append(&dead, root);
+                    if (ok == 0) {
+                        return 0;
+                    }
+                }
+            }
+            index = index + 1;
+        }
+        index = 0;
+        while (index < live_count) {
+            root = live_set[index].root;
+            if (root != NULL) {
+                candidate = live_set[index].height;
+                if (candidate == height) {
+                    ok = frontier_append(&live, root);
+                    if (ok == 0) {
+                        return 0;
+                    }
+                }
+            }
+            index = index + 1;
+        }
+
+        dead_next.count = 0;
+        live_next.count = 0;
+
+        /* A node both sides reach is shared: prune it from both and do not
+         * descend, because everything beneath it is shared too. */
+        count = live.count;
+        index = 0;
+        while (index < count) {
+            node = live.nodes[index];
+            shared = frontier_holds(&dead, node);
+            if (shared == 0) {
+                ok = push_children(node, height, &live_next);
+                if (ok == 0) {
+                    return 0;
+                }
+            }
+            index = index + 1;
+        }
+
+        count = dead.count;
+        index = 0;
+        while (index < count) {
+            node = dead.nodes[index];
+            shared = frontier_holds(&live, node);
+            if (shared == 0) {
+                ok = push_children(node, height, &dead_next);
+                if (ok == 0) {
+                    return 0;
+                }
+                free_one(pool, node, height);
+            }
+            index = index + 1;
+        }
+
+        if (height == 0) {
+            return 1;
+        }
+
+        memcpy(&dead, &dead_next, sizeof(Frontier));
+        memcpy(&live, &live_next, sizeof(Frontier));
+        height = height - 1;
+    }
+}
+
+/* The pool rounds every allocation up to its alignment, so a measurement
+ * that did not would never match pool_live.
+ *
+ * requires: size > 0.
+ * ensures:  the result is what the pool actually spends on it.
+ */
+static size_t rounded_size(size_t size)
+{
+    size_t remainder;
+
+    remainder = size % POOL_ALIGNMENT;
+    if (remainder == 0) {
+        return size;
+    }
+    return size + (POOL_ALIGNMENT - remainder);
+}
+
+/* requires: holds a read share of the subtree at `node`.
+ * ensures:  the read share is returned; the result is the pool memory that
+ *           subtree occupies.
+ */
+static size_t measure_node(const void *node, uint32_t height)
+{
+    const RopeNode *source;
+    uint32_t        count;
+    uint32_t        index;
+    const void     *child;
+    size_t          total;
+    size_t          deeper;
+
+    if (height == 0) {
+        return rounded_size(ROPE_LEAF_BYTES);
+    }
+
+    source = node;
+    count = source->child_count;
+    total = rounded_size(sizeof(RopeNode));
+    index = 0;
+    while (index < count) {
+        child = source->children[index];
+        deeper = measure_node(child, height - 1);
+        total = total + deeper;
+        index = index + 1;
+    }
+    return total;
+}
+
+/* requires: as rope.h.
+ * ensures:  as rope.h.
+ */
+size_t rope_allocated_bytes(const Rope *rope)
+{
+    const void *root;
+    uint32_t    height;
+    size_t      total;
+
+    root = rope->root;
+    if (root == NULL) {
+        return 0;
+    }
+    height = rope->height;
+    total = measure_node(root, height);
+    return total;
 }

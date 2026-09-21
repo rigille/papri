@@ -97,6 +97,8 @@ static int add_slab(Pool *pool)
  */
 int pool_initialize(Pool *pool)
 {
+    size_t index;
+
     pool->slabs = NULL;
     pool->slab_count = 0;
     pool->slab_capacity = 0;
@@ -104,6 +106,12 @@ int pool_initialize(Pool *pool)
     pool->current_used = 0;
     pool->current_size = 0;
     pool->handed_out = 0;
+    pool->live = 0;
+    index = 0;
+    while (index < POOL_SIZE_CLASSES) {
+        pool->free_list[index] = NULL;
+        index = index + 1;
+    }
     return 1;
 }
 
@@ -132,10 +140,24 @@ void pool_release(Pool *pool)
     pool_initialize(pool);
 }
 
+/* requires: 0 < size, and its class is below POOL_SIZE_CLASSES.
+ * ensures:  the result is that class index. No memory is accessed.
+ */
+static size_t class_of(size_t size)
+{
+    size_t rounded;
+    size_t index;
+
+    rounded = round_up_to_alignment(size);
+    index = rounded / POOL_ALIGNMENT;
+    return index - 1;
+}
+
 /* requires: node_pool(pool, live, residual); 0 < size <= POOL_SLAB_BYTES.
  * ensures:  node_pool(pool, live', residual) where live' is live plus one
  *           fresh zeroed allocation of at least `size` bytes, aligned to
- *           POOL_ALIGNMENT, and the result points at it; or the allocation
+ *           POOL_ALIGNMENT, reusing a freed block of the same class when one
+ *           is available, and the result points at it; or the allocation
  *           failed, live' is live, and the result is null.
  */
 void *pool_allocate(Pool *pool, size_t size)
@@ -144,8 +166,11 @@ void *pool_allocate(Pool *pool, size_t size)
     size_t used;
     size_t available;
     size_t capacity;
+    size_t class_index;
     unsigned char *base;
     unsigned char *block;
+    void *recycled;
+    void *next;
     int added;
 
     if (size == 0) {
@@ -155,6 +180,19 @@ void *pool_allocate(Pool *pool, size_t size)
     wanted = round_up_to_alignment(size);
     if (wanted > POOL_SLAB_BYTES) {
         return NULL;
+    }
+
+    class_index = class_of(size);
+    if (class_index < POOL_SIZE_CLASSES) {
+        recycled = pool->free_list[class_index];
+        if (recycled != NULL) {
+            next = *(void **)recycled;
+            pool->free_list[class_index] = next;
+            used = pool->live;
+            pool->live = used + wanted;
+            memset(recycled, 0, wanted);
+            return recycled;
+        }
     }
 
     used = pool->current_used;
@@ -174,9 +212,51 @@ void *pool_allocate(Pool *pool, size_t size)
 
     used = pool->handed_out;
     pool->handed_out = used + wanted;
+    used = pool->live;
+    pool->live = used + wanted;
 
     memset(block, 0, wanted);
     return block;
+}
+
+/* requires: as pool.h.
+ * ensures:  as pool.h.
+ */
+void pool_free(Pool *pool, void *block, size_t size)
+{
+    size_t wanted;
+    size_t class_index;
+    size_t used;
+    void  *head;
+
+    if (block == NULL) {
+        return;
+    }
+    wanted = round_up_to_alignment(size);
+    class_index = class_of(size);
+    if (class_index >= POOL_SIZE_CLASSES) {
+        return;
+    }
+
+    /* The free-list link lives inside the block, which is at least one
+     * alignment wide, so it always fits. */
+    head = pool->free_list[class_index];
+    *(void **)block = head;
+    pool->free_list[class_index] = block;
+
+    used = pool->live;
+    pool->live = used - wanted;
+}
+
+/* requires: node_pool(pool, live, residual).
+ * ensures:  as pool.h.
+ */
+size_t pool_live(const Pool *pool)
+{
+    size_t total;
+
+    total = pool->live;
+    return total;
 }
 
 /* requires: node_pool(pool, live, residual).

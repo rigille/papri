@@ -7,6 +7,36 @@
  * would defeat the point of having a rope at all. */
 #define SEARCH_WINDOW 4096
 
+/* Every rope an edit builds and then stops using. Splitting and
+ * concatenating leaves spines that neither the version we started from nor
+ * the one we produced can reach, so version-to-version diffing would never
+ * collect them; they are handed to the reclamation walk as dead roots when
+ * the edit finishes. */
+#define SCRAP_CAPACITY 256
+
+/* requires: `scrap` holds `count` entries and has room for SCRAP_CAPACITY;
+ *           rope(candidate, bytes, share) is a rope the edit has stopped
+ *           using.
+ * ensures:  `scrap` records it when there was room and the result is the
+ *           new count; or it was full and the result is `count`, in which
+ *           case that rope is simply never collected.
+ */
+static uint32_t remember_scrap(Rope *scrap, uint32_t count,
+                               const Rope *candidate)
+{
+    const void *root;
+
+    root = candidate->root;
+    if (root == NULL) {
+        return count;
+    }
+    if (count >= SCRAP_CAPACITY) {
+        return count;
+    }
+    memcpy(&scrap[count], candidate, sizeof(Rope));
+    return count + 1;
+}
+
 /* requires: *result writable; the span is within the buffer.
  * ensures:  *result has one more span appended and the outcome is 1; or it
  *           was already full and the outcome is 0.
@@ -431,10 +461,13 @@ int address_replace_all(Pool *pool, const Rope *rope,
                         uint32_t replacement_length,
                         Rope *result)
 {
+    Rope     scrap[SCRAP_CAPACITY];
+    Rope     survivors[2];
     Rope     built;
     Rope     joined;
     Rope     gap;
     Rope     inserted;
+    uint32_t scrap_count;
     uint32_t count;
     uint32_t index;
     uint32_t position;
@@ -445,18 +478,22 @@ int address_replace_all(Pool *pool, const Rope *rope,
 
     count = decomposition->count;
     total = rope->byte_count;
+    scrap_count = 0;
 
     rope_initialize_empty(&built);
-    ok = rope_from_bytes(pool, replacement, replacement_length, &inserted);
-    if (ok == 0) {
-        return 0;
-    }
 
     position = 0;
     index = 0;
     while (index < count) {
         start = decomposition->focus[index].start;
         end = decomposition->focus[index].end;
+
+        /* Fresh each time, never spliced twice: see the note above. */
+        ok = rope_from_bytes(pool, replacement, replacement_length,
+                             &inserted);
+        if (ok == 0) {
+            return 0;
+        }
 
         ok = rope_slice(pool, rope, position, start, &gap);
         if (ok == 0) {
@@ -466,10 +503,15 @@ int address_replace_all(Pool *pool, const Rope *rope,
         if (ok == 0) {
             return 0;
         }
+        scrap_count = remember_scrap(scrap, scrap_count, &built);
+        scrap_count = remember_scrap(scrap, scrap_count, &gap);
+
         ok = rope_concat(pool, &joined, &inserted, &built);
         if (ok == 0) {
             return 0;
         }
+        scrap_count = remember_scrap(scrap, scrap_count, &joined);
+        scrap_count = remember_scrap(scrap, scrap_count, &inserted);
 
         position = end;
         index = index + 1;
@@ -480,7 +522,16 @@ int address_replace_all(Pool *pool, const Rope *rope,
         return 0;
     }
     ok = rope_concat(pool, &built, &gap, result);
-    return ok;
+    if (ok == 0) {
+        return 0;
+    }
+    scrap_count = remember_scrap(scrap, scrap_count, &built);
+    scrap_count = remember_scrap(scrap, scrap_count, &gap);
+
+    memcpy(&survivors[0], rope, sizeof(Rope));
+    memcpy(&survivors[1], result, sizeof(Rope));
+    rope_free_difference(pool, scrap, scrap_count, survivors, 2);
+    return 1;
 }
 
 /* requires: as address.h.
@@ -492,10 +543,13 @@ int address_insert_all(Pool *pool, const Rope *rope,
                        uint32_t insertion_length,
                        Rope *result)
 {
+    Rope     scrap[SCRAP_CAPACITY];
+    Rope     survivors[2];
     Rope     built;
     Rope     joined;
     Rope     gap;
     Rope     inserted;
+    uint32_t scrap_count;
     uint32_t count;
     uint32_t index;
     uint32_t position;
@@ -507,18 +561,21 @@ int address_insert_all(Pool *pool, const Rope *rope,
 
     count = decomposition->count;
     total = rope->byte_count;
+    scrap_count = 0;
 
     rope_initialize_empty(&built);
-    ok = rope_from_bytes(pool, insertion, insertion_length, &inserted);
-    if (ok == 0) {
-        return 0;
-    }
 
     position = 0;
     index = 0;
     while (index < count) {
         start = decomposition->focus[index].start;
         end = decomposition->focus[index].end;
+
+        /* Fresh each time, never spliced twice: see the note above. */
+        ok = rope_from_bytes(pool, insertion, insertion_length, &inserted);
+        if (ok == 0) {
+            return 0;
+        }
 
         at = end;
         if (before == 1) {
@@ -533,10 +590,15 @@ int address_insert_all(Pool *pool, const Rope *rope,
         if (ok == 0) {
             return 0;
         }
+        scrap_count = remember_scrap(scrap, scrap_count, &built);
+        scrap_count = remember_scrap(scrap, scrap_count, &gap);
+
         ok = rope_concat(pool, &joined, &inserted, &built);
         if (ok == 0) {
             return 0;
         }
+        scrap_count = remember_scrap(scrap, scrap_count, &joined);
+        scrap_count = remember_scrap(scrap, scrap_count, &inserted);
 
         position = at;
         index = index + 1;
@@ -547,5 +609,14 @@ int address_insert_all(Pool *pool, const Rope *rope,
         return 0;
     }
     ok = rope_concat(pool, &built, &gap, result);
-    return ok;
+    if (ok == 0) {
+        return 0;
+    }
+    scrap_count = remember_scrap(scrap, scrap_count, &built);
+    scrap_count = remember_scrap(scrap, scrap_count, &gap);
+
+    memcpy(&survivors[0], rope, sizeof(Rope));
+    memcpy(&survivors[1], result, sizeof(Rope));
+    rope_free_difference(pool, scrap, scrap_count, survivors, 2);
+    return 1;
 }

@@ -97,6 +97,14 @@ int address_find_literal(const Rope *rope, uint32_t from,
                          const unsigned char *pattern, uint32_t pattern_length,
                          uint32_t *found);
 
+/* A version must be a TREE, not a DAG: no node may appear twice within one
+ * version. The reclamation walk frees each node it reaches exactly once, so
+ * a node reached twice would be freed twice. That is why the replacement is
+ * rebuilt at every focus below rather than one rope being spliced into all
+ * of them. Sharing BETWEEN versions is the whole design; sharing WITHIN one
+ * is a bug.
+ */
+
 /* The isomorphism, put back together with a new focus everywhere.
  *
  * Built left to right as gap ++ replacement ++ gap ++ replacement ++ … so no

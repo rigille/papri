@@ -602,6 +602,10 @@ static void adopt(Editor *editor, const Rope *replacement)
     memcpy(&editor->text, replacement, sizeof(Rope));
     editor->modified = 1;
 
+    /* The new version joins the history, which retires the oldest when the
+     * window is full and hands its unshared nodes back to the pool. */
+    history_push(&editor->history, &editor->pool, replacement);
+
     total = editor->text.byte_count;
     newlines = editor->text.newline_count;
     lines = newlines;
@@ -715,15 +719,12 @@ int editor_load(Editor *editor, const char *path)
         return 0;
     }
 
-    memcpy(&editor->text, &loaded, sizeof(Rope));
-    editor->modified = 0;
     editor->current_line = 0;
     snprintf(editor->name, NAME_CAPACITY, "%s", path);
 
-    ok = 1;
     adopt(editor, &loaded);
     editor->modified = 0;
-    return ok;
+    return 1;
 }
 
 /* requires: *editor is allocated and writable.
@@ -737,6 +738,7 @@ int editor_initialize(Editor *editor)
     if (ok == 0) {
         return 0;
     }
+    history_initialize(&editor->history);
     rope_initialize_empty(&editor->text);
     editor->current_line = 0;
     editor->modified = 0;

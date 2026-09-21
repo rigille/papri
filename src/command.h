@@ -2,6 +2,7 @@
 #define PAPRI_COMMAND_H
 
 #include "address.h"
+#include "history.h"
 #include "pool.h"
 #include "rope.h"
 
@@ -24,6 +25,7 @@
 
 typedef struct Editor {
     Pool     pool;
+    History  history;
     Rope     text;
     uint32_t current_line;
     int      modified;
@@ -33,8 +35,11 @@ typedef struct Editor {
 
 /* ── Abstract predicates ────────────────────────────────────────────────────
  * editor(editor)
- *   Owns *editor: its pool, and the current version of the buffer, which is
- *   rope(&editor->text, bytes, share) holding shares drawn from that pool.
+ *   Owns *editor: its pool, its history, and the current version of the
+ *   buffer, which is rope(&editor->text, bytes, share) holding shares drawn
+ *   from that pool and is also the newest version in the history. Older
+ *   versions stay readable until the history retires them, at which point
+ *   the nodes they alone held go back to the pool.
  *   `current_line` counts from 1 and names a line of `bytes`, or is 0 when
  *   the buffer is empty. `name` is the NUL-terminated file the buffer came
  *   from, empty when it came from nowhere.

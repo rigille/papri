@@ -16,6 +16,10 @@
 
 #define POOL_ALIGNMENT 64
 
+/* Free lists are kept per size class, a class being a multiple of the
+ * alignment. Two classes are live today: a rope leaf, and a rope node. */
+#define POOL_SIZE_CLASSES 16
+
 /* ── Abstract predicates ────────────────────────────────────────────────────
  * node_pool(pool, live, residual)
  *   Owns its slabs and the slab directory. `live` is the set of allocations
@@ -34,6 +38,8 @@ typedef struct Pool {
     size_t          current_used;
     size_t          current_size;
     size_t          handed_out;
+    size_t          live;
+    void           *free_list[POOL_SIZE_CLASSES];
 } Pool;
 
 /* requires: *pool is allocated and writable.
@@ -71,5 +77,22 @@ size_t pool_handed_out(const Pool *pool);
  *           written.
  */
 size_t pool_reserved(const Pool *pool);
+
+/* Hand a block back. The caller must hold the FULL share of it — every other
+ * reference must be gone — which is the whole reason reclamation waits for
+ * the reclamation walk to say so rather than guessing.
+ *
+ * requires: node_pool(pool, live, residual) where `block` is in `live` and
+ *           was allocated with `size`, and nothing else references it.
+ * ensures:  node_pool(pool, live', residual) with that block removed from
+ *           live and available to a later allocation of the same class.
+ */
+void pool_free(Pool *pool, void *block, size_t size);
+
+/* requires: node_pool(pool, live, residual).
+ * ensures:  node_pool(pool, live, residual); the result is the total size of
+ *           the blocks handed out and not yet freed. No memory is written.
+ */
+size_t pool_live(const Pool *pool);
 
 #endif /* PAPRI_POOL_H */
