@@ -1,54 +1,42 @@
-#include "papri.h"
+#include "utf8.h"
 
+#include <inttypes.h>
+#include <stdint.h>
 #include <stdio.h>
 
-/* A file-scope ring rather than a local. The subset prefers nonaddressable
- * locals, and a struct can only cross a function boundary by pointer, so a
- * local ring would force `&ring` for no reason. */
-static ByteRing ring;
+/* A placeholder driver, and for now also the smoke test that the vendored
+ * decoder links and runs. It reads standard input into a fixed buffer and
+ * reports what it found. The fixed buffer goes away in M1, when the rope
+ * replaces it. */
 
-/* requires: standard output is writable.
- * ensures:  the bytes 1..5 are pushed, then drained oldest first and written
- *           to standard output as decimal numbers on one line; the result is
- *           0, or 1 if a push was refused.
+#define INPUT_CAPACITY (1024 * 1024)
+
+/* File scope rather than a local: the subset prefers nonaddressable locals,
+ * and a megabyte on the stack is a poor idea regardless. */
+static uint8_t input[INPUT_CAPACITY];
+
+/* requires: standard input is readable and standard output is writable.
+ * ensures:  at most INPUT_CAPACITY bytes are read from standard input, and
+ *           one line naming their count and the number of code points in
+ *           their longest valid UTF-8 prefix is written to standard output;
+ *           the result is 0.
  */
 int main(void)
 {
-    /* The only addressable local: byte_ring_pop needs an out-parameter, so
-     * its address is unavoidable. Taking it costs more than it looks — the
-     * variable moves to memory, so every mention of it becomes a load, and
-     * a load may not appear inside a call argument or a condition. Hence
-     * `number` below, which exists only to hold the loaded byte. */
-    unsigned char popped_value;
+    FILE *input_stream;
+    size_t read_count;
+    uint64_t byte_count;
+    uint64_t codepoint_count;
 
-    unsigned char value;
-    unsigned int  index;
-    unsigned int  number;
-    int pushed;
-    int popped;
+    /* `stdin` is an extern pointer, so reading it is a load and may not sit
+     * inside a call argument. */
+    input_stream = stdin;
+    read_count = fread(input, 1, INPUT_CAPACITY, input_stream);
 
-    byte_ring_initialize(&ring);
+    byte_count = read_count;
+    codepoint_count = count_codepoints(input, byte_count);
 
-    index = 0;
-    while (index < 5) {
-        value = (unsigned char)(index + 1);
-        pushed = byte_ring_push(&ring, value);
-        if (pushed == 0) {
-            return 1;
-        }
-        index = index + 1;
-    }
-
-    number = byte_ring_length(&ring);
-    printf("buffered %u byte(s):", number);
-
-    popped = byte_ring_pop(&ring, &popped_value);
-    while (popped == 1) {
-        number = popped_value;
-        printf(" %u", number);
-        popped = byte_ring_pop(&ring, &popped_value);
-    }
-
-    printf("\n");
+    printf("%" PRIu64 " bytes, %" PRIu64 " code points\n",
+           byte_count, codepoint_count);
     return 0;
 }

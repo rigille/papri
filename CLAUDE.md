@@ -1,9 +1,20 @@
 # papri — Conventions
 
-A pure C project. <!-- TODO: one paragraph on what papri is and does. -->
+A modernized `ed`. It keeps `ed`'s essential property — no terminal control, no
+cursor addressing, just reading commands and printing text — because that is
+what lets the terminal's own scrollback hold several regions of several files at
+once, and what frees the editor to print *derived* views (the functions in a
+file, a slice, a hex dump) instead of always printing the buffer. Buffers are
+byte sequences backed by an immutable RRB tree, so every version is retained and
+every background job holds a stable snapshot; IO is `io_uring` under a strictly
+serialized transcript; and the command language is built from optics, where an
+address is an isomorphism `Buffer ≅ (prefix, focus, suffix)` and a command is a
+function on the focus.
 
 These are the same rules the sibling project `../kelci` follows: the code is
 written to stay mechanically verifiable, and every function carries a contract.
+Two sections at the end — on vendored verified code, and on shares — are papri's
+own, and are load-bearing here in a way they were not for `kelci`.
 
 ## Code style
 
@@ -122,6 +133,86 @@ void ring_dequeue_before(EventRing *ring, Microseconds time);
 When touching an undocumented function, write its spec first (from the current
 behaviour), then make your change and update the spec together with the body.
 
+## Vendored verified code is exempt from the gates
+
+`vendor/` is skipped by `make lint` and `make normalform` and compiles with
+relaxed warnings. That is deliberate.
+
+The subset is a **proxy** for verifiability: we write C that needs no
+normalization so that what you verify is exactly what you read. Where a
+machine-checked proof already exists, the proof supersedes the proxy. Holding
+such a file to the subset would mean rewriting it, which discards the proof —
+the opposite of the point.
+
+`vendor/utf8/utf8.c` is the current case: Höhrmann's DFA decoder, proved to
+full functional correctness in `../tools/coq/VerifiableC/Utf8.v`. It would fail
+our gates (`next_state` writes through a pointer from a `?:` whose branches
+load), and `../tools` runs `clightgen -normalize` precisely because it does not
+need pre-normalized source.
+
+The rules for anything under `vendor/`:
+
+- **Vendored byte-identical, never edited** — not even for naming or style. The
+  proof is against `clightgen -normalize` of that exact file, so any edit voids
+  it. `make vendor-check` enforces this against a recorded SHA-256 and, when
+  the sibling checkout is present, against `$(TOOLS)` itself.
+- **The header is ours.** Upstream files here ship no header; we write one, with
+  specs in the house style stating what the Coq funspecs prove.
+- **Record the provenance and the license** in a `README.md` beside it.
+
+## Shares — how to write predicates about immutable sharing
+
+`kelci` and `ciska` phrase read-only aliasing in English as "borrowed,
+non-owning". That cannot express a DAG, and papri's buffers *are* a DAG: two
+versions of a buffer own overlapping sets of RRB nodes.
+
+The property that makes this tractable is that **a node is immutable once
+sealed**. Read shares over immutable data split and rejoin freely, which is
+exactly what lets two paths reach one node. Predicates therefore name a share:
+
+```c
+/* ── Abstract predicates ────────────────────────────────────────────────────
+ * rope_node(node, contents, share)
+ *   Holds `share` of *node, sealed and immutable. Read shares split:
+ *   rope_node(n, c, s1 ⊕ s2) is rope_node(n, c, s1) * rope_node(n, c, s2).
+ *   This is what lets two paths reach one node; a mutable node could not.
+ *
+ * version(root, bytes, share)
+ *   Holds `share` of every node reachable from `root`. `bytes` is the byte
+ *   sequence it denotes.
+ *
+ * node_pool(pool, live, residual)
+ *   Owns the slabs. For each node in `live`, holds the complement of every
+ *   share handed out. A node whose residual share is the full share is dead
+ *   and may be freed.
+ */
+```
+
+Three consequences worth stating, because they are what the design rests on:
+
+- **Deallocation needs the full share**, so "no other reference survives" is
+  enforced by the logic rather than remembered by convention. A background job
+  holding a snapshot holds a share; you therefore cannot free under it.
+- **Shares are ghost state** with no runtime footprint. They say *when* freeing
+  is permitted; they cannot find the nodes. That is the diff walk's job. The
+  obligation tying the two together, to be written down now and proved later:
+  *the diff walk returns exactly the nodes whose shares have rejoined to the
+  full share.*
+- **Fix a scheme for how a node's share divides** among k referents rather than
+  letting it be ad hoc. VST shares are infinitely divisible so there is no
+  overflow hazard, but arbitrary lattice elements mean share arithmetic in every
+  proof.
+
 ## Build
 
 Nix flake for the toolchain (`nix develop`), plain `make` inside it.
+
+| Target | What it does |
+|---|---|
+| `make` | `build/libpapri.a` and `build/papri` |
+| `make test` | build and run the tests |
+| `make lint` | grep gate — `goto`, `volatile`, varargs, embedded `++`, missing specs |
+| `make normalform` | clightgen gate — source is already in the logic's normal form, no by-value structs |
+| `make vendor-check` | vendored verified code is unedited |
+| `make asan` | the tests under `-fsanitize=address,undefined` |
+| `make check` | all of the above |

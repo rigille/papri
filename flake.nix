@@ -46,7 +46,7 @@
         packages = [
           pkgs.clang               # -Wlarge-by-value-copy is clang-only
           pkgs.gnumake
-          pkgs.coqPackages.compcert # clightgen — the `normalform` gate
+          #pkgs.coqPackages.compcert # clightgen — the `normalform` gate
           pkgs.diffutils
           pkgs.bear                # compile_commands.json for ccls
           pkgs.ccls
@@ -59,6 +59,8 @@
           echo "│  make             — build lib + binary"
           echo "│  make test        — build and run the tests"
           echo "│  make lint        — grep gate: goto/volatile/varargs/specs"
+          echo "│  make vendor-check — vendored verified code is unedited"
+          echo "│  make asan        — tests under address/UB sanitizers"
           echo "│  make normalform  — clightgen gate: source is already normal"
           echo "│  make check       — lint + normalform + test"
           echo "│  make compiledb   — regenerate compile_commands.json"
@@ -83,7 +85,7 @@
         cp -r ${./.} source
         chmod -R u+w source
         cd source
-        make CC=clang lint normalform
+        make CC=clang lint normalform vendor-check
         touch $out
       '';
     });

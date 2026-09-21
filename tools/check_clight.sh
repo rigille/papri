@@ -28,6 +28,9 @@
 
 set -u
 
+# Include flags, so the gate sees the same headers the build does.
+include_flags=${CLIGHT_INCLUDE:--Isrc}
+
 output_directory="$1"
 shift
 
@@ -42,8 +45,8 @@ for source in "$@"; do
     plain="$output_directory/$name.plain.v"
     normalized="$output_directory/$name.normalized.v"
 
-    clightgen -Isrc -o "$plain" "$source" || exit 1
-    clightgen -Isrc -normalize -o "$normalized" "$source" || exit 1
+    clightgen $include_flags -o "$plain" "$source" || exit 1
+    clightgen $include_flags -normalize -o "$normalized" "$source" || exit 1
 
     if diff -q <(sed "$strip_metadata" "$plain") \
                <(sed "$strip_metadata" "$normalized") >/dev/null; then
