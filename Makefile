@@ -87,9 +87,10 @@ test: $(TEST_BINARIES)
 	done; \
 	exit $$status
 # A hand-rolled reclamation scheme needs these; neither sibling repo has them.
+# Built into its own directory: a sanitized object file cannot be linked by
+# an ordinary build, so the two trees must not share one.
 asan:
-	@$(MAKE) --no-print-directory clean
-	@$(MAKE) --no-print-directory test \
+	@$(MAKE) --no-print-directory test BUILD=$(BUILD)/asan \
 	    COPT="-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined \
 	          -fno-sanitize-recover=all"
 

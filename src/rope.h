@@ -104,6 +104,16 @@ int rope_copy_range(const Rope *rope, uint32_t offset, uint32_t length,
 int rope_split(Pool *pool, const Rope *rope, uint32_t offset,
                Rope *left, Rope *right);
 
+/* requires: node_pool(pool, live, residual); rope(rope, bytes, share);
+ *           start <= end <= |bytes|; *slice is writable and is not *rope.
+ * ensures:  rope(rope, bytes, share) is returned; rope(slice, s, share2)
+ *           where s is bytes[start, end), sharing what it can, and the
+ *           result is 1; or the range was out of order or allocation failed
+ *           and the result is 0.
+ */
+int rope_slice(Pool *pool, const Rope *rope, uint32_t start, uint32_t end,
+               Rope *slice);
+
 /* requires: node_pool(pool, live, residual); rope(left, a, share_a) and
  *           rope(right, b, share_b); *result is writable.
  * ensures:  both inputs are returned; rope(result, a ++ b, share') and the

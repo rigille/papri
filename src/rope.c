@@ -1528,3 +1528,35 @@ int rope_check_invariants(const Rope *rope)
     }
     return 1;
 }
+
+/* requires: as rope.h.
+ * ensures:  as rope.h.
+ */
+int rope_slice(Pool *pool, const Rope *rope, uint32_t start, uint32_t end,
+               Rope *slice)
+{
+    Rope     head;
+    Rope     tail;
+    Rope     discarded;
+    uint32_t total;
+    int      outcome;
+
+    total = rope->byte_count;
+    if (start > end) {
+        return 0;
+    }
+    if (end > total) {
+        return 0;
+    }
+
+    outcome = rope_split(pool, rope, end, &head, &discarded);
+    if (outcome == 0) {
+        return 0;
+    }
+    outcome = rope_split(pool, &head, start, &discarded, &tail);
+    if (outcome == 0) {
+        return 0;
+    }
+    memcpy(slice, &tail, sizeof(Rope));
+    return 1;
+}
