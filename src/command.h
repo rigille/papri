@@ -6,6 +6,7 @@
 #include "io.h"
 #include "pool.h"
 #include "rope.h"
+#include "view.h"
 
 /* The command layer: parse one line, resolve its address against the current
  * version, apply a verb to every focus.
@@ -22,8 +23,23 @@
  * happened.
  */
 
-#define NAME_CAPACITY 1024
-#define JOB_CAPACITY  8
+#define NAME_CAPACITY   1024
+#define JOB_CAPACITY    8
+#define BUFFER_CAPACITY 16
+
+/* A buffer that is not the current one. The current buffer's state lives
+ * directly in the Editor, and switching saves it here and loads another
+ * back, so every command below keeps working on `editor->text` without
+ * knowing that several buffers exist. */
+typedef struct BufferSlot {
+    Rope     text;
+    History  history;
+    uint32_t current_line;
+    uint32_t serial;
+    int      modified;
+    int      used;
+    char     name[NAME_CAPACITY];
+} BufferSlot;
 
 /* Work that runs while you keep editing. A job records the version it was
  * launched against, so when it lands it can say whether the buffer has
@@ -45,7 +61,9 @@ typedef struct Job {
 } Job;
 
 typedef struct Editor {
-    Pool     pool;
+    Pool       pool;          /* shared by every buffer */
+    BufferSlot slots[BUFFER_CAPACITY];
+    uint32_t   current;
     History  history;
     Rope     text;
     IoLoop  *loop;
@@ -64,7 +82,9 @@ typedef struct Editor {
  *   buffer, which is rope(&editor->text, bytes, share) holding shares drawn
  *   from that pool and is also the newest version in the history. Older
  *   versions stay readable until the history retires them, at which point
- *   the nodes they alone held go back to the pool.
+ *   the nodes they alone held go back to the pool. The other buffers live
+ *   in `slots`, each with its own history and its own versions, all drawn
+ *   from the one pool; `current` says which slot the live fields belong to.
  *   `current_line` counts from 1 and names a line of `bytes`, or is 0 when
  *   the buffer is empty. `name` is the NUL-terminated file the buffer came
  *   from, empty when it came from nowhere.
@@ -98,6 +118,25 @@ int editor_execute(Editor *editor, const char *line);
  *           the buffer is unchanged, and the result is 0.
  */
 int editor_load(Editor *editor, const char *path);
+
+/* requires: editor(editor); index < BUFFER_CAPACITY.
+ * ensures:  editor(editor) with that buffer current, its own text, history
+ *           and name live, and the result 1; or no such buffer and the
+ *           result is 0. An unused slot becomes an empty buffer.
+ */
+int editor_select_buffer(Editor *editor, uint32_t index);
+
+/* requires: editor(editor).
+ * ensures:  editor(editor); one line per buffer in use is written, the
+ *           current one marked.
+ */
+void editor_report_buffers(Editor *editor);
+
+/* requires: editor(editor).
+ * ensures:  editor(editor); the result is the lowest unused buffer index, or
+ *           BUFFER_CAPACITY when they are all in use. No memory is written.
+ */
+uint32_t editor_free_buffer(const Editor *editor);
 
 /* requires: editor(editor); io_loop(loop, pending) which must outlive the
  *           editor.

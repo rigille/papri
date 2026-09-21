@@ -60,6 +60,10 @@
         buildInputs = [ pkgs.liburing ];
 
         shellHook = ''
+          # clang, because -Wlarge-by-value-copy is clang-only and it is one
+          # of the gates. gcc builds fine, just with one fewer check.
+          export CC=clang
+
           echo ""
           echo "┌─ papri ───────────────────────────────────────────"
           echo "│  make             — build lib + binary"

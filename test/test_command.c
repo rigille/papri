@@ -319,6 +319,47 @@ static void test_old_versions_survive_edits(void)
     report("an edit leaves every older version intact", before);
 }
 
+/* requires: node_pool is live.
+ * ensures:  `failures` counts the ways buffers leaked into one another.
+ *           Seeing several files at once is the point, so they must not.
+ */
+static void test_buffers_are_independent(void)
+{
+    int before;
+    int ok;
+
+    before = failures;
+
+    load_text("first buffer\n");
+    expect_buffer("first buffer\n", "buffer 0 starts out right");
+
+    ok = run("b1");
+    expect(ok == 1, "switching to an unused buffer succeeds");
+    expect_buffer("", "an unused buffer starts empty");
+
+    load_text("second buffer\n");
+    expect_buffer("second buffer\n", "buffer 1 holds its own text");
+
+    ok = run("b0");
+    expect(ok == 1, "switching back succeeds");
+    expect_buffer("first buffer\n", "buffer 0 kept its text");
+
+    /* @N runs a command against another buffer and returns. */
+    ok = run("@1 1c changed\\n");
+    expect(ok == 1, "a command against another buffer succeeds");
+    expect_buffer("first buffer\n",
+                  "the current buffer is untouched by @");
+
+    ok = run("b1");
+    expect(ok == 1, "switching to the edited buffer succeeds");
+    expect_buffer("changed\n", "@ edited the buffer it named");
+
+    ok = run("b99");
+    expect(ok == 0, "a buffer past the end is refused");
+
+    report("buffers hold their own text and do not leak", before);
+}
+
 /* requires: standard output is writable.
  * ensures:  every test above has run and reported; the result is 0 when
  *           `failures` is 0 and 1 otherwise.
@@ -340,6 +381,7 @@ int main(void)
     test_substitution();
     test_pattern_addresses();
     test_old_versions_survive_edits();
+    test_buffers_are_independent();
 
     editor_release(&editor);
 

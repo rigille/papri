@@ -248,7 +248,7 @@ static uint32_t parse_address(const char *line, uint32_t position,
         return at + 1;
     }
 
-    if (value == 0x24) {                      /*  last line */
+    if (value == 0x24) {                      /* $  the last line */
         command->address.kind = ADDRESS_LAST;
         command->addressed = 1;
         return at + 1;
@@ -757,6 +757,16 @@ int editor_initialize(Editor *editor)
     history_initialize(&editor->history);
     rope_initialize_empty(&editor->text);
     editor->loop = NULL;
+    editor->current = 0;
+    index = 0;
+    while (index < BUFFER_CAPACITY) {
+        editor->slots[index].used = 0;
+        rope_initialize_empty(&editor->slots[index].text);
+        history_initialize(&editor->slots[index].history);
+        editor->slots[index].name[0] = 0x00;
+        index = index + 1;
+    }
+    editor->slots[0].used = 1;
     editor->next_job_id = 1;
     editor->serial = 0;
     index = 0;
@@ -814,6 +824,11 @@ int editor_execute(Editor *editor, const char *line)
     uint32_t      length_slot;
     uint32_t      pattern_length;
     uint32_t      count;
+    uint32_t      index;
+    uint32_t      span_start;
+    uint32_t      span_end;
+    uint32_t      next;
+    uint32_t      previous;
     char          verb;
     char          value;
     int           ok;
@@ -823,8 +838,32 @@ int editor_execute(Editor *editor, const char *line)
     position = skip_blanks(line, position);
 
     value = line[position];
-    if (value == '\0') {
+    if (value == 0x00) {
         return 1;
+    }
+
+    /* @N runs the rest of the line against another buffer and comes back.
+     * This is what makes several files visible in one transcript without
+     * losing your place in any of them. */
+    if (value == 0x40) {
+        position = position + 1;
+        next = read_number(line, position, &length_slot);
+        if (next == position) {
+            write_line("?  @ needs a buffer number");
+            return 0;
+        }
+        position = next;
+        index = length_slot;
+        previous = editor->current;
+        ok = editor_select_buffer(editor, index);
+        if (ok == 0) {
+            write_line("?  no such buffer");
+            return 0;
+        }
+        position = skip_blanks(line, position);
+        ok = editor_execute(editor, line + position);
+        editor_select_buffer(editor, previous);
+        return ok;
     }
 
     position = parse_address(line, position, &command);
@@ -861,6 +900,44 @@ int editor_execute(Editor *editor, const char *line)
         }
         write_line("?  unknown job");
         return 0;
+    }
+
+    if (verb == 0x62) {                       /* b  list or switch buffers */
+        position = skip_blanks(line, position);
+        value = line[position];
+        if (value == 0x00) {
+            editor_report_buffers(editor);
+            return 1;
+        }
+        next = read_number(line, position, &length_slot);
+        if (next == position) {
+            write_line("?  b needs a buffer number");
+            return 0;
+        }
+        index = length_slot;
+        ok = editor_select_buffer(editor, index);
+        if (ok == 0) {
+            write_line("?  no such buffer");
+            return 0;
+        }
+        return 1;
+    }
+
+    if (verb == 0x45) {                       /* E  load into a new buffer */
+        position = skip_blanks(line, position);
+        snprintf(path, NAME_CAPACITY, "%s", line + position);
+        index = editor_free_buffer(editor);
+        if (index == BUFFER_CAPACITY) {
+            write_line("?  every buffer is in use");
+            return 0;
+        }
+        editor_select_buffer(editor, index);
+        ok = editor_load(editor, path);
+        if (ok == 0) {
+            write_line("?  cannot read that file");
+            return 0;
+        }
+        return 1;
     }
 
     if (verb == 0x71) {                       /* q */
@@ -923,8 +1000,32 @@ int editor_execute(Editor *editor, const char *line)
         print_foci(editor, &foci, 1);
         return 1;
     }
-    if (verb == '=') {
+    if (verb == 0x3D) {                       /* =  extents */
         print_extents(editor, &foci);
+        return 1;
+    }
+
+    if (verb == 0x78) {                       /* x  hex */
+        count = foci.count;
+        index = 0;
+        while (index < count) {
+            span_start = foci.focus[index].start;
+            span_end = foci.focus[index].end;
+            view_write_hex(&editor->text, span_start, span_end);
+            index = index + 1;
+        }
+        return 1;
+    }
+
+    if (verb == 0x75) {                       /* u  code points */
+        count = foci.count;
+        index = 0;
+        while (index < count) {
+            span_start = foci.focus[index].start;
+            span_end = foci.focus[index].end;
+            view_write_codepoints(&editor->text, span_start, span_end);
+            index = index + 1;
+        }
         return 1;
     }
 
@@ -1306,4 +1407,145 @@ void editor_report_jobs(const Editor *editor)
     if (shown == 0) {
         write_line("no jobs in flight");
     }
+}
+
+/* requires: editor(editor).
+ * ensures:  editor(editor) with the live fields copied into the slot they
+ *           belong to, so another buffer can be loaded over them.
+ */
+static void save_current_buffer(Editor *editor)
+{
+    uint32_t index;
+    uint32_t line_number;
+    uint32_t serial;
+    int      modified;
+
+    index = editor->current;
+    memcpy(&editor->slots[index].text, &editor->text, sizeof(Rope));
+    memcpy(&editor->slots[index].history, &editor->history, sizeof(History));
+
+    /* One dereference per statement: a field-to-field copy is a load and a
+     * store, which is two. */
+    line_number = editor->current_line;
+    editor->slots[index].current_line = line_number;
+    serial = editor->serial;
+    editor->slots[index].serial = serial;
+    modified = editor->modified;
+    editor->slots[index].modified = modified;
+    editor->slots[index].used = 1;
+    snprintf(editor->slots[index].name, NAME_CAPACITY, "%s", editor->name);
+}
+
+/* requires: editor(editor); index < BUFFER_CAPACITY.
+ * ensures:  editor(editor) whose live fields are that slot's, and `current`
+ *           is index. The previous buffer must already have been saved.
+ */
+static void load_buffer(Editor *editor, uint32_t index)
+{
+    uint32_t line_number;
+    uint32_t serial;
+    int      modified;
+    int      used;
+
+    used = editor->slots[index].used;
+    if (used == 0) {
+        rope_initialize_empty(&editor->slots[index].text);
+        history_initialize(&editor->slots[index].history);
+        editor->slots[index].current_line = 0;
+        editor->slots[index].serial = 0;
+        editor->slots[index].modified = 0;
+        editor->slots[index].name[0] = 0x00;
+        editor->slots[index].used = 1;
+    }
+
+    memcpy(&editor->text, &editor->slots[index].text, sizeof(Rope));
+    memcpy(&editor->history, &editor->slots[index].history, sizeof(History));
+
+    line_number = editor->slots[index].current_line;
+    editor->current_line = line_number;
+    serial = editor->slots[index].serial;
+    editor->serial = serial;
+    modified = editor->slots[index].modified;
+    editor->modified = modified;
+    snprintf(editor->name, NAME_CAPACITY, "%s",
+             editor->slots[index].name);
+    editor->current = index;
+}
+
+/* requires: as command.h.
+ * ensures:  as command.h.
+ */
+int editor_select_buffer(Editor *editor, uint32_t index)
+{
+    uint32_t now;
+
+    if (index >= BUFFER_CAPACITY) {
+        return 0;
+    }
+    now = editor->current;
+    if (now == index) {
+        return 1;
+    }
+    save_current_buffer(editor);
+    load_buffer(editor, index);
+    return 1;
+}
+
+/* requires: as command.h.
+ * ensures:  as command.h.
+ */
+void editor_report_buffers(Editor *editor)
+{
+    char     label[NAME_CAPACITY + 96];
+    FILE    *stream;
+    uint32_t index;
+    uint32_t now;
+    uint32_t length;
+    uint32_t lines;
+    int      used;
+    int      modified;
+    char     mark;
+
+    save_current_buffer(editor);
+    stream = stdout;
+    now = editor->current;
+
+    index = 0;
+    while (index < BUFFER_CAPACITY) {
+        used = editor->slots[index].used;
+        if (used == 1) {
+            mark = ' ';
+            if (index == now) {
+                mark = '*';
+            }
+            length = editor->slots[index].text.byte_count;
+            lines = editor->slots[index].text.newline_count;
+            modified = editor->slots[index].modified;
+            snprintf(label, sizeof(label), "%c%u\t%u bytes, %u lines%s\t%s\n",
+                     mark, index, length, lines,
+                     modified == 1 ? "  (modified)" : "",
+                     editor->slots[index].name);
+            fputs(label, stream);
+        }
+        index = index + 1;
+    }
+}
+
+/* requires: as command.h.
+ * ensures:  as command.h.
+ */
+uint32_t editor_free_buffer(const Editor *editor)
+{
+    uint32_t index;
+    int      used;
+
+    index = 0;
+    while (index < BUFFER_CAPACITY) {
+        used = editor->slots[index].used;
+        if (used == 0) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return BUFFER_CAPACITY;
 }

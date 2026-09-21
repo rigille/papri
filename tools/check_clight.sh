@@ -31,7 +31,9 @@
 
 set -u
 
-include_flags="-std=c11 ${CLIGHT_INCLUDE:--Isrc}"
+# -U_FORTIFY_SOURCE: a hardened shell defines it, and clightgen's
+# preprocessor is not GCC, so glibc warns on every translation unit.
+include_flags="-std=c11 -U_FORTIFY_SOURCE ${CLIGHT_INCLUDE:--Isrc}"
 
 output_directory="$1"
 shift
