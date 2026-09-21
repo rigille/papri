@@ -130,10 +130,12 @@ asan:
 	    COPT="-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined \
 	          -fno-sanitize-recover=all"
 
+# Invoked through bash rather than the shebang: a Nix build sandbox has no
+# /usr/bin/env, so `nix flake check` cannot resolve one.
 # Grep gate: the rules no compiler flag and no AST check can see.
 # vendor/ is exempt on purpose — see vendor/utf8/README.md.
 lint:
-	@tools/check_subset.sh $(LIBRARY_SOURCES) $(PROGRAM_SOURCES) $(TEST_SOURCES) \
+	@bash tools/check_subset.sh $(LIBRARY_SOURCES) $(PROGRAM_SOURCES) $(TEST_SOURCES) \
 	    $(wildcard src/*.h)
 
 # clightgen gate: the source is already in the program logic's normal form,
@@ -150,7 +152,7 @@ NORMALFORM_SOURCES := $(filter-out src/io.c src/structure.c,$(LIBRARY_SOURCES)) 
 NORMALFORM := $(BUILD)/normalform
 
 normalform:
-	@CLIGHT_INCLUDE="$(INCLUDE)" tools/check_clight.sh $(NORMALFORM) $(NORMALFORM_SOURCES)
+	@CLIGHT_INCLUDE="$(INCLUDE)" bash tools/check_clight.sh $(NORMALFORM) $(NORMALFORM_SOURCES)
 
 # The proof in $(TOOLS) is against clightgen -normalize of that exact file, so
 # any drift in our copy silently voids it.
