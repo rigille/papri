@@ -757,6 +757,7 @@ int editor_initialize(Editor *editor)
     history_initialize(&editor->history);
     rope_initialize_empty(&editor->text);
     editor->loop = NULL;
+    editor->structure = NULL;
     editor->current = 0;
     index = 0;
     while (index < BUFFER_CAPACITY) {
@@ -788,6 +789,7 @@ int editor_initialize(Editor *editor)
  */
 void editor_release(Editor *editor)
 {
+    Structure     *loaded;
     uint32_t       index;
     unsigned char *buffer;
     int            descriptor;
@@ -805,6 +807,9 @@ void editor_release(Editor *editor)
         }
         index = index + 1;
     }
+    loaded = editor->structure;
+    structure_destroy(loaded);
+    editor->structure = NULL;
     pool_release(&editor->pool);
     rope_initialize_empty(&editor->text);
 }
@@ -900,6 +905,11 @@ int editor_execute(Editor *editor, const char *line)
         }
         write_line("?  unknown job");
         return 0;
+    }
+
+    if (verb == 0x46) {                       /* F  the definitions here */
+        ok = editor_list_definitions(editor);
+        return ok;
     }
 
     if (verb == 0x62) {                       /* b  list or switch buffers */
@@ -1548,4 +1558,69 @@ uint32_t editor_free_buffer(const Editor *editor)
         index = index + 1;
     }
     return BUFFER_CAPACITY;
+}
+
+/* The grammar is loaded on first use, not at startup: most sessions never
+ * ask for structure, and a session that does should not have paid for it.
+ *
+ * requires: editor(editor).
+ * ensures:  editor(editor) with a grammar loaded when one could be found,
+ *           and the result is 1; or none is configured or it failed to
+ *           load, a reason is written, and the result is 0.
+ */
+static int ensure_structure(Editor *editor)
+{
+    Structure  *loaded;
+    const char *directory;
+    const char *language;
+
+    loaded = editor->structure;
+    if (loaded != NULL) {
+        return 1;
+    }
+
+    directory = getenv("PAPRI_GRAMMAR");
+    if (directory == NULL) {
+        write_line("?  no grammar; set PAPRI_GRAMMAR to one");
+        return 0;
+    }
+    language = getenv("PAPRI_LANGUAGE");
+    if (language == NULL) {
+        language = "c";
+    }
+
+    loaded = structure_create(directory, language);
+    if (loaded == NULL) {
+        write_line("?  that grammar would not load");
+        return 0;
+    }
+
+    editor->structure = loaded;
+    return 1;
+}
+
+/* requires: as command.h.
+ * ensures:  as command.h.
+ */
+int editor_list_definitions(Editor *editor)
+{
+    Structure *loaded;
+    int        found;
+    int        ok;
+
+    ok = ensure_structure(editor);
+    if (ok == 0) {
+        return 0;
+    }
+
+    loaded = editor->structure;
+    found = structure_list_definitions(loaded, &editor->text);
+    if (found < 0) {
+        write_line("?  could not parse the buffer");
+        return 0;
+    }
+    if (found == 0) {
+        write_line("no definitions found");
+    }
+    return 1;
 }

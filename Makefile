@@ -5,7 +5,13 @@
 # -Wpedantic -Werror.
 URING_CFLAGS := $(shell pkg-config --cflags liburing 2>/dev/null)
 URING_LIBS   := $(shell pkg-config --libs liburing 2>/dev/null || echo -luring)
-URING_SYSTEM := $(URING_CFLAGS:-I%=-isystem %)# papri — see CLAUDE.md for the rules this build enforces.
+URING_SYSTEM := $(URING_CFLAGS:-I%=-isystem %)
+
+# tree-sitter, the second foreign boundary. Grammars are dlopened at run
+# time, so only the library itself is linked.
+TS_CFLAGS := $(shell pkg-config --cflags tree-sitter 2>/dev/null)
+TS_LIBS   := $(shell pkg-config --libs tree-sitter 2>/dev/null || echo -ltree-sitter)
+TS_SYSTEM := $(TS_CFLAGS:-I%=-isystem %)# papri — see CLAUDE.md for the rules this build enforces.
 
 CC    ?= clang
 AR    ?= ar
@@ -49,6 +55,10 @@ CFLAGS  := $(CSTD) $(COPT) $(CWARN) $(INCLUDE) -fno-common
 IO_CFLAGS := -std=gnu17 $(COPT) -Wall -Wextra $(INCLUDE) $(URING_SYSTEM) \
              -fno-common
 
+# Same treatment for the tree-sitter boundary.
+STRUCTURE_CFLAGS := -std=gnu17 $(COPT) -Wall -Wextra $(INCLUDE) $(TS_SYSTEM) \
+                    -fno-common
+
 # Vendored verified code is exempt from the subset and from -Werror. It has a
 # machine-checked proof instead of our proxy for one; see vendor/utf8/README.md.
 VENDOR_CFLAGS := $(CSTD) $(COPT) -Wall -Wextra $(INCLUDE) -fno-common
@@ -56,7 +66,7 @@ VENDOR_CFLAGS := $(CSTD) $(COPT) -Wall -Wextra $(INCLUDE) -fno-common
 # Compile-only warning flags are unused at link time, and -Werror turns
 # "argument unused during compilation" into an error. Link without them.
 LDFLAGS := $(CSTD) $(COPT)
-LDLIBS  := $(URING_LIBS)
+LDLIBS  := $(URING_LIBS) $(TS_LIBS) -ldl
 
 LIBRARY_SOURCES := $(wildcard src/*.c)
 LIBRARY_SOURCES := $(filter-out src/main.c,$(LIBRARY_SOURCES))
@@ -93,6 +103,10 @@ $(OBJ)/src/io.o: src/io.c
 	@mkdir -p $(dir $@)
 	$(CC) $(IO_CFLAGS) -MMD -MP -c -o $@ $<
 
+$(OBJ)/src/structure.o: src/structure.c
+	@mkdir -p $(dir $@)
+	$(CC) $(STRUCTURE_CFLAGS) -MMD -MP -c -o $@ $<
+
 $(OBJ)/vendor/%.o: vendor/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(VENDOR_CFLAGS) -MMD -MP -c -o $@ $<
@@ -125,10 +139,13 @@ lint:
 # clightgen gate: the source is already in the program logic's normal form,
 # and no struct crosses a function boundary by value. vendor/ is exempt.
 # See tools/check_clight.sh.
-# src/io.c cannot go through this gate: liburing.h reaches stdatomic.h and
-# CompCert stops at `_Atomic`. It is the foreign boundary, deliberately thin,
-# and still covered by `make lint`. See src/io.h.
-NORMALFORM_SOURCES := $(filter-out src/io.c,$(LIBRARY_SOURCES)) $(PROGRAM_SOURCES)
+# Two files cannot go through this gate, both foreign boundaries kept
+# deliberately thin and both still covered by `make lint`:
+#   src/io.c        liburing.h reaches stdatomic.h; CompCert stops at _Atomic
+#   src/structure.c tree-sitter and dlfcn, same story
+# See src/io.h and src/structure.h.
+NORMALFORM_SOURCES := $(filter-out src/io.c src/structure.c,$(LIBRARY_SOURCES)) \
+                      $(PROGRAM_SOURCES)
 
 NORMALFORM := $(BUILD)/normalform
 

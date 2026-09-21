@@ -6,6 +6,7 @@
 #include "io.h"
 #include "pool.h"
 #include "rope.h"
+#include "structure.h"
 #include "view.h"
 
 /* The command layer: parse one line, resolve its address against the current
@@ -66,7 +67,8 @@ typedef struct Editor {
     uint32_t   current;
     History  history;
     Rope     text;
-    IoLoop  *loop;
+    IoLoop    *loop;
+    Structure *structure;      /* the grammar, loaded on first use */
     Job      jobs[JOB_CAPACITY];
     uint32_t next_job_id;
     uint32_t serial;
@@ -118,6 +120,17 @@ int editor_execute(Editor *editor, const char *line);
  *           the buffer is unchanged, and the result is 0.
  */
 int editor_load(Editor *editor, const char *path);
+
+/* The command that makes folding unnecessary: ask for the definitions and
+ * they are printed, rather than hiding the rest of the buffer to reveal
+ * them.
+ *
+ * requires: editor(editor).
+ * ensures:  editor(editor); every definition in the current buffer is
+ *           written as its line, its kind and its name, and the result is
+ *           1; or no grammar was available and the result is 0.
+ */
+int editor_list_definitions(Editor *editor);
 
 /* requires: editor(editor); index < BUFFER_CAPACITY.
  * ensures:  editor(editor) with that buffer current, its own text, history

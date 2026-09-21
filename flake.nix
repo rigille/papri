@@ -24,7 +24,7 @@
       src     = ./.;
 
       nativeBuildInputs = [ pkgs.gnumake pkgs.clang pkgs.pkg-config ];
-      buildInputs = [ pkgs.liburing ];
+      buildInputs = [ pkgs.liburing pkgs.tree-sitter ];
 
       # clightgen is deliberately absent here: `nix build` produces the binary,
       # `nix flake check` runs the subset gate. Keeping them apart means a
@@ -35,7 +35,9 @@
       installPhase = ''
         install -Dm755 build/papri      $out/bin/papri
         install -Dm644 build/libpapri.a $out/lib/libpapri.a
-        install -Dm644 src/papri.h      $out/include/papri.h
+        for header in src/*.h; do
+          install -Dm644 "$header" "$out/include/papri/$(basename $header)"
+        done
       '';
     };
   in {
@@ -57,12 +59,17 @@
 
         # A library we link against, so buildInputs rather than packages:
         # that is what puts its pkg-config file on PKG_CONFIG_PATH.
-        buildInputs = [ pkgs.liburing ];
+        buildInputs = [ pkgs.liburing pkgs.tree-sitter ];
 
         shellHook = ''
           # clang, because -Wlarge-by-value-copy is clang-only and it is one
           # of the gates. gcc builds fine, just with one fewer check.
           export CC=clang
+
+          # A tree-sitter grammar is a shared object plus a tags query,
+          # loaded at run time. papri reads these two to find one.
+          export PAPRI_GRAMMAR="${pkgs.tree-sitter-grammars.tree-sitter-c}"
+          export PAPRI_LANGUAGE=c
 
           echo ""
           echo "┌─ papri ───────────────────────────────────────────"
@@ -94,7 +101,7 @@
           pkgs.gnumake pkgs.clang pkgs.pkg-config
           pkgs.coqPackages.compcert pkgs.diffutils
         ];
-        buildInputs = [ pkgs.liburing ];
+        buildInputs = [ pkgs.liburing pkgs.tree-sitter ];
       } ''
         cp -r ${./.} source
         chmod -R u+w source
