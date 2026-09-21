@@ -1,4 +1,11 @@
-# papri — see CLAUDE.md for the rules this build enforces.
+# io_uring. src/io.c is the only file that includes liburing.h, so only it
+# gets these flags — every other file sees the opaque interface in src/io.h
+# and stays inside the subset. Kept as -isystem so the library's own
+# headers, which use zero-length arrays and C23 enum values, do not trip
+# -Wpedantic -Werror.
+URING_CFLAGS := $(shell pkg-config --cflags liburing 2>/dev/null)
+URING_LIBS   := $(shell pkg-config --libs liburing 2>/dev/null || echo -luring)
+URING_SYSTEM := $(URING_CFLAGS:-I%=-isystem %)# papri — see CLAUDE.md for the rules this build enforces.
 
 CC    ?= clang
 AR    ?= ar
@@ -30,7 +37,17 @@ endif
 
 INCLUDE := -Isrc -Ivendor/utf8
 
+# io_uring. src/io.c is the only file that touches it, and the only one
+# exempt from the normal-form gate; see src/io.h.
+URING_CFLAGS := $(shell pkg-config --cflags liburing 2>/dev/null)
+URING_LIBS   := $(shell pkg-config --libs liburing 2>/dev/null || echo -luring)
+
 CFLAGS  := $(CSTD) $(COPT) $(CWARN) $(INCLUDE) -fno-common
+
+# The foreign boundary needs gnu17 for sigset_t and relaxed warnings for
+# liburing's headers. Nothing else in the tree is built this way.
+IO_CFLAGS := -std=gnu17 $(COPT) -Wall -Wextra $(INCLUDE) $(URING_SYSTEM) \
+             -fno-common
 
 # Vendored verified code is exempt from the subset and from -Werror. It has a
 # machine-checked proof instead of our proxy for one; see vendor/utf8/README.md.
@@ -39,6 +56,7 @@ VENDOR_CFLAGS := $(CSTD) $(COPT) -Wall -Wextra $(INCLUDE) -fno-common
 # Compile-only warning flags are unused at link time, and -Werror turns
 # "argument unused during compilation" into an error. Link without them.
 LDFLAGS := $(CSTD) $(COPT)
+LDLIBS  := $(URING_LIBS)
 
 LIBRARY_SOURCES := $(wildcard src/*.c)
 LIBRARY_SOURCES := $(filter-out src/main.c,$(LIBRARY_SOURCES))
@@ -64,12 +82,16 @@ $(LIBRARY): $(LIBRARY_OBJECTS) $(VENDOR_OBJECTS)
 
 $(PROGRAM): $(PROGRAM_OBJECTS) $(LIBRARY)
 	@mkdir -p $(dir $@)
-	$(CC) $(LDFLAGS) -o $@ $(PROGRAM_OBJECTS) $(LIBRARY)
+	$(CC) $(LDFLAGS) -o $@ $(PROGRAM_OBJECTS) $(LIBRARY) $(LDLIBS)
 
 # One binary per test file, so each keeps its own main.
 $(BUILD)/test_%: $(OBJ)/test/test_%.o $(LIBRARY)
 	@mkdir -p $(dir $@)
-	$(CC) $(LDFLAGS) -o $@ $< $(LIBRARY)
+	$(CC) $(LDFLAGS) -o $@ $< $(LIBRARY) $(LDLIBS)
+
+$(OBJ)/src/io.o: src/io.c
+	@mkdir -p $(dir $@)
+	$(CC) $(IO_CFLAGS) -MMD -MP -c -o $@ $<
 
 $(OBJ)/vendor/%.o: vendor/%.c
 	@mkdir -p $(dir $@)
@@ -103,10 +125,15 @@ lint:
 # clightgen gate: the source is already in the program logic's normal form,
 # and no struct crosses a function boundary by value. vendor/ is exempt.
 # See tools/check_clight.sh.
+# src/io.c cannot go through this gate: liburing.h reaches stdatomic.h and
+# CompCert stops at `_Atomic`. It is the foreign boundary, deliberately thin,
+# and still covered by `make lint`. See src/io.h.
+NORMALFORM_SOURCES := $(filter-out src/io.c,$(LIBRARY_SOURCES)) $(PROGRAM_SOURCES)
+
 NORMALFORM := $(BUILD)/normalform
 
 normalform:
-	@CLIGHT_INCLUDE="$(INCLUDE)" tools/check_clight.sh $(NORMALFORM) $(LIBRARY_SOURCES) $(PROGRAM_SOURCES)
+	@CLIGHT_INCLUDE="$(INCLUDE)" tools/check_clight.sh $(NORMALFORM) $(NORMALFORM_SOURCES)
 
 # The proof in $(TOOLS) is against clightgen -normalize of that exact file, so
 # any drift in our copy silently voids it.

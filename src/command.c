@@ -13,6 +13,15 @@
 #define PARSE_FAILED     0xFFFFFFFFu
 #define LINE_RANGE_OPEN  0xFFFFFFFFu
 
+/* Defined below, beside the rest of the job machinery.
+ *
+ * requires: editor(editor); `path` is NUL-terminated.
+ * ensures:  editor(editor) with one more job in flight and the result 1; or
+ *           the job could not be started, a reason is written, and the
+ *           result is 0.
+ */
+static int start_job(Editor *editor, JobKind kind, const char *path);
+
 /* One parsed command line. A pure value: the address is data, the verb is a
  * byte, and the operand text has already had its escapes resolved. */
 typedef struct Command {
@@ -591,6 +600,7 @@ static int compose_matches(const Editor *editor, const Decomposition *outer,
  */
 static void adopt(Editor *editor, const Rope *replacement)
 {
+    uint32_t serial;
     uint32_t total;
     uint32_t newlines;
     uint32_t lines;
@@ -601,6 +611,11 @@ static void adopt(Editor *editor, const Rope *replacement)
 
     memcpy(&editor->text, replacement, sizeof(Rope));
     editor->modified = 1;
+
+    /* Every version gets a number, which is how a job that lands late can
+     * say how far the buffer has moved since it was launched. */
+    serial = editor->serial;
+    editor->serial = serial + 1;
 
     /* The new version joins the history, which retires the oldest when the
      * window is full and hands its unshared nodes back to the pool. */
@@ -732,7 +747,8 @@ int editor_load(Editor *editor, const char *path)
  */
 int editor_initialize(Editor *editor)
 {
-    int ok;
+    uint32_t index;
+    int      ok;
 
     ok = pool_initialize(&editor->pool);
     if (ok == 0) {
@@ -740,10 +756,20 @@ int editor_initialize(Editor *editor)
     }
     history_initialize(&editor->history);
     rope_initialize_empty(&editor->text);
+    editor->loop = NULL;
+    editor->next_job_id = 1;
+    editor->serial = 0;
+    index = 0;
+    while (index < JOB_CAPACITY) {
+        editor->jobs[index].kind = JOB_IDLE;
+        editor->jobs[index].buffer = NULL;
+        editor->jobs[index].descriptor = -1;
+        index = index + 1;
+    }
     editor->current_line = 0;
     editor->modified = 0;
     editor->quit = 0;
-    editor->name[0] = '\0';
+    editor->name[0] = 0x00;
     return 1;
 }
 
@@ -752,6 +778,23 @@ int editor_initialize(Editor *editor)
  */
 void editor_release(Editor *editor)
 {
+    uint32_t       index;
+    unsigned char *buffer;
+    int            descriptor;
+    JobKind        kind;
+
+    index = 0;
+    while (index < JOB_CAPACITY) {
+        kind = editor->jobs[index].kind;
+        if (kind != JOB_IDLE) {
+            buffer = editor->jobs[index].buffer;
+            free(buffer);
+            descriptor = editor->jobs[index].descriptor;
+            io_close(descriptor);
+            editor->jobs[index].kind = JOB_IDLE;
+        }
+        index = index + 1;
+    }
     pool_release(&editor->pool);
     rope_initialize_empty(&editor->text);
 }
@@ -798,7 +841,29 @@ int editor_execute(Editor *editor, const char *line)
         position = position + 1;
     }
 
-    if (verb == 'q') {
+    if (verb == 0x26) {                       /* &  start or list jobs */
+        position = skip_blanks(line, position);
+        value = line[position];
+        if (value == 0x00) {
+            editor_report_jobs(editor);
+            return 1;
+        }
+        position = position + 1;
+        position = skip_blanks(line, position);
+        snprintf(path, NAME_CAPACITY, "%s", line + position);
+        if (value == 0x65) {                  /* &e path  load in the background */
+            ok = start_job(editor, JOB_LOAD, path);
+            return ok;
+        }
+        if (value == 0x63) {                  /* &c path  count in the background */
+            ok = start_job(editor, JOB_COUNT, path);
+            return ok;
+        }
+        write_line("?  unknown job");
+        return 0;
+    }
+
+    if (verb == 0x71) {                       /* q */
         editor->quit = 1;
         return 1;
     }
@@ -968,4 +1033,277 @@ int editor_execute(Editor *editor, const char *line)
 
     write_line("?  unknown command");
     return 0;
+}
+
+/* requires: as command.h.
+ * ensures:  as command.h.
+ */
+void editor_attach_loop(Editor *editor, IoLoop *loop)
+{
+    editor->loop = loop;
+}
+
+/* requires: editor(editor).
+ * ensures:  editor(editor); the result is the index of an idle job slot, or
+ *           JOB_CAPACITY when every slot is busy. No memory is written.
+ */
+static uint32_t idle_slot(const Editor *editor)
+{
+    uint32_t index;
+    JobKind  kind;
+
+    index = 0;
+    while (index < JOB_CAPACITY) {
+        kind = editor->jobs[index].kind;
+        if (kind == JOB_IDLE) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return JOB_CAPACITY;
+}
+
+/* requires: editor(editor); `path` is NUL-terminated.
+ * ensures:  editor(editor) with one more job in flight, a line naming it
+ *           written, and the result 1; or the job could not be started, a
+ *           reason written, and the result 0.
+ */
+static int start_job(Editor *editor, JobKind kind, const char *path)
+{
+    char           label[NAME_CAPACITY + 64];
+    IoLoop        *loop;
+    unsigned char *buffer;
+    int64_t        size;
+    int64_t        length;
+    int            descriptor;
+    uint32_t       slot;
+    uint32_t       identifier;
+    uint32_t       serial;
+    uint64_t       token;
+    FILE          *stream;
+    int            ok;
+
+    loop = editor->loop;
+    if (loop == NULL) {
+        write_line("?  no event loop; jobs need one");
+        return 0;
+    }
+
+    slot = idle_slot(editor);
+    if (slot == JOB_CAPACITY) {
+        write_line("?  too many jobs in flight");
+        return 0;
+    }
+
+    size = 0;
+    descriptor = io_open_for_read(path, &size);
+    if (descriptor < 0) {
+        write_line("?  cannot open that file");
+        return 0;
+    }
+    /* `size` is addressable, so every later mention of it would be a load.
+     * Take it into a register once. */
+    length = size;
+    if (length < 0) {
+        io_close(descriptor);
+        return 0;
+    }
+
+    buffer = malloc((size_t)length + 1);
+    if (buffer == NULL) {
+        io_close(descriptor);
+        write_line("?  out of memory");
+        return 0;
+    }
+
+    identifier = editor->next_job_id;
+    editor->next_job_id = identifier + 1;
+
+    editor->jobs[slot].kind = kind;
+    editor->jobs[slot].id = identifier;
+    editor->jobs[slot].descriptor = descriptor;
+    editor->jobs[slot].buffer = buffer;
+    editor->jobs[slot].capacity = (uint32_t)length;
+    serial = editor->serial;
+    editor->jobs[slot].launched_at = serial;
+    snprintf(editor->jobs[slot].path, NAME_CAPACITY, "%s", path);
+
+    token = (uint64_t)identifier + 1u;
+    ok = io_submit_read(loop, token, descriptor, buffer, (uint32_t)length, 0);
+    if (ok == 0) {
+        free(buffer);
+        io_close(descriptor);
+        editor->jobs[slot].kind = JOB_IDLE;
+        write_line("?  could not submit the read");
+        return 0;
+    }
+
+    stream = stdout;
+    snprintf(label, sizeof(label), "[%u] reading %s\n", identifier, path);
+    fputs(label, stream);
+    return 1;
+}
+
+/* requires: editor(editor).
+ * ensures:  editor(editor); the slot's buffer and descriptor are released
+ *           and it is marked idle.
+ */
+static void retire_job(Editor *editor, uint32_t slot)
+{
+    unsigned char *buffer;
+    int            descriptor;
+
+    buffer = editor->jobs[slot].buffer;
+    free(buffer);
+    descriptor = editor->jobs[slot].descriptor;
+    io_close(descriptor);
+
+    editor->jobs[slot].kind = JOB_IDLE;
+    editor->jobs[slot].buffer = NULL;
+    editor->jobs[slot].descriptor = -1;
+}
+
+/* requires: as command.h.
+ * ensures:  as command.h.
+ */
+int editor_complete(Editor *editor, uint64_t token, int32_t result)
+{
+    char     label[NAME_CAPACITY + 160];
+    Rope     loaded;
+    FILE    *stream;
+    uint32_t slot;
+    uint32_t identifier;
+    uint32_t launched;
+    uint32_t now;
+    uint32_t moved;
+    uint32_t lines;
+    uint32_t index;
+    uint32_t length;
+    unsigned char *buffer;
+    unsigned char  value;
+    JobKind  kind;
+    int      ok;
+
+    if (token == IO_TOKEN_INPUT) {
+        return 0;
+    }
+    identifier = (uint32_t)(token - 1u);
+
+    slot = 0;
+    while (slot < JOB_CAPACITY) {
+        kind = editor->jobs[slot].kind;
+        if (kind != JOB_IDLE) {
+            now = editor->jobs[slot].id;
+            if (now == identifier) {
+                break;
+            }
+        }
+        slot = slot + 1;
+    }
+    if (slot == JOB_CAPACITY) {
+        return 0;
+    }
+
+    stream = stdout;
+    kind = editor->jobs[slot].kind;
+    launched = editor->jobs[slot].launched_at;
+    now = editor->serial;
+    moved = now - launched;
+
+    if (result < 0) {
+        snprintf(label, sizeof(label), "[%u] read failed\n", identifier);
+        fputs(label, stream);
+        retire_job(editor, slot);
+        return 1;
+    }
+
+    length = (uint32_t)result;
+    buffer = editor->jobs[slot].buffer;
+
+    if (kind == JOB_COUNT) {
+        lines = 0;
+        index = 0;
+        while (index < length) {
+            value = buffer[index];
+            if (value == 0x0A) {
+                lines = lines + 1;
+            }
+            index = index + 1;
+        }
+        snprintf(label, sizeof(label),
+                 "[%u] %s: %u bytes, %u lines  (launched at version %u,"
+                 " now %u)\n",
+                 identifier, editor->jobs[slot].path, length, lines,
+                 launched, now);
+        fputs(label, stream);
+        retire_job(editor, slot);
+        return 1;
+    }
+
+    /* A load races the buffer. The version stamp is what makes the race
+     * visible instead of silent: if anything was edited since the read was
+     * launched, the result is stale and applying it would throw that work
+     * away. */
+    if (moved > 0) {
+        snprintf(label, sizeof(label),
+                 "[%u] %s read, but the buffer moved on %u version(s) since;"
+                 " discarded\n",
+                 identifier, editor->jobs[slot].path, moved);
+        fputs(label, stream);
+        retire_job(editor, slot);
+        return 1;
+    }
+
+    ok = rope_from_bytes(&editor->pool, buffer, length, &loaded);
+    if (ok == 0) {
+        snprintf(label, sizeof(label), "[%u] out of memory\n", identifier);
+        fputs(label, stream);
+        retire_job(editor, slot);
+        return 1;
+    }
+
+    snprintf(editor->name, NAME_CAPACITY, "%s", editor->jobs[slot].path);
+    editor->current_line = 0;
+    adopt(editor, &loaded);
+    editor->modified = 0;
+
+    snprintf(label, sizeof(label), "[%u] %s loaded, %u bytes\n", identifier,
+             editor->name, length);
+    fputs(label, stream);
+    retire_job(editor, slot);
+    return 1;
+}
+
+/* requires: as command.h.
+ * ensures:  as command.h.
+ */
+void editor_report_jobs(const Editor *editor)
+{
+    char     label[NAME_CAPACITY + 64];
+    FILE    *stream;
+    uint32_t slot;
+    uint32_t identifier;
+    uint32_t launched;
+    uint32_t shown;
+    JobKind  kind;
+
+    stream = stdout;
+    shown = 0;
+    slot = 0;
+    while (slot < JOB_CAPACITY) {
+        kind = editor->jobs[slot].kind;
+        if (kind != JOB_IDLE) {
+            identifier = editor->jobs[slot].id;
+            launched = editor->jobs[slot].launched_at;
+            snprintf(label, sizeof(label),
+                     "[%u] %s  (launched at version %u)\n", identifier,
+                     editor->jobs[slot].path, launched);
+            fputs(label, stream);
+            shown = shown + 1;
+        }
+        slot = slot + 1;
+    }
+    if (shown == 0) {
+        write_line("no jobs in flight");
+    }
 }

@@ -3,6 +3,7 @@
 
 #include "address.h"
 #include "history.h"
+#include "io.h"
 #include "pool.h"
 #include "rope.h"
 
@@ -22,11 +23,35 @@
  */
 
 #define NAME_CAPACITY 1024
+#define JOB_CAPACITY  8
+
+/* Work that runs while you keep editing. A job records the version it was
+ * launched against, so when it lands it can say whether the buffer has
+ * moved on — and refuse to clobber it if it has. */
+typedef enum JobKind {
+    JOB_IDLE,
+    JOB_LOAD,    /* read a file and replace the buffer, if it still can */
+    JOB_COUNT    /* read a file and report its size and line count */
+} JobKind;
+
+typedef struct Job {
+    JobKind        kind;
+    uint32_t       id;
+    int            descriptor;
+    unsigned char *buffer;
+    uint32_t       capacity;
+    uint32_t       launched_at;
+    char           path[NAME_CAPACITY];
+} Job;
 
 typedef struct Editor {
     Pool     pool;
     History  history;
     Rope     text;
+    IoLoop  *loop;
+    Job      jobs[JOB_CAPACITY];
+    uint32_t next_job_id;
+    uint32_t serial;
     uint32_t current_line;
     int      modified;
     int      quit;
@@ -73,5 +98,33 @@ int editor_execute(Editor *editor, const char *line);
  *           the buffer is unchanged, and the result is 0.
  */
 int editor_load(Editor *editor, const char *path);
+
+/* requires: editor(editor); io_loop(loop, pending) which must outlive the
+ *           editor.
+ * ensures:  editor(editor) able to start jobs on that loop. Without one,
+ *           every job command is refused and the editor is simply
+ *           synchronous.
+ */
+void editor_attach_loop(Editor *editor, IoLoop *loop);
+
+/* Report a finished job and act on it.
+ *
+ * Called only BETWEEN commands, never during one. That is the whole
+ * transcript discipline: the scrollback is the interface, so nothing may
+ * interleave its output with a command's.
+ *
+ * requires: editor(editor); `token` and `result` come from io_wait.
+ * ensures:  editor(editor), advanced if the job applied an edit; the
+ *           outcome is written to standard output, naming the version the
+ *           job was launched against and how far the buffer has moved since.
+ *           The result is 1 when the token named a live job.
+ */
+int editor_complete(Editor *editor, uint64_t token, int32_t result);
+
+/* requires: editor(editor).
+ * ensures:  editor(editor); one line per job still in flight is written. No
+ *           memory is written.
+ */
+void editor_report_jobs(const Editor *editor);
 
 #endif /* PAPRI_COMMAND_H */

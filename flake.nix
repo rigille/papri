@@ -23,7 +23,8 @@
       version = "0.1.0";
       src     = ./.;
 
-      nativeBuildInputs = [ pkgs.gnumake pkgs.clang ];
+      nativeBuildInputs = [ pkgs.gnumake pkgs.clang pkgs.pkg-config ];
+      buildInputs = [ pkgs.liburing ];
 
       # clightgen is deliberately absent here: `nix build` produces the binary,
       # `nix flake check` runs the subset gate. Keeping them apart means a
@@ -46,12 +47,17 @@
         packages = [
           pkgs.clang               # -Wlarge-by-value-copy is clang-only
           pkgs.gnumake
-          #pkgs.coqPackages.compcert # clightgen — the `normalform` gate
+          pkgs.coqPackages.compcert # clightgen — the `normalform` gate
           pkgs.diffutils
           pkgs.bear                # compile_commands.json for ccls
           pkgs.ccls
           pkgs.gdb
+          pkgs.pkg-config
         ];
+
+        # A library we link against, so buildInputs rather than packages:
+        # that is what puts its pkg-config file on PKG_CONFIG_PATH.
+        buildInputs = [ pkgs.liburing ];
 
         shellHook = ''
           echo ""
@@ -80,7 +86,11 @@
     checks = forAllSystems (system:
     let pkgs = pkgsFor system; in {
       subset = pkgs.runCommand "papri-subset" {
-        nativeBuildInputs = [ pkgs.gnumake pkgs.clang pkgs.coqPackages.compcert pkgs.diffutils ];
+        nativeBuildInputs = [
+          pkgs.gnumake pkgs.clang pkgs.pkg-config
+          pkgs.coqPackages.compcert pkgs.diffutils
+        ];
+        buildInputs = [ pkgs.liburing ];
       } ''
         cp -r ${./.} source
         chmod -R u+w source
