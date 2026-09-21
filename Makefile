@@ -49,11 +49,10 @@ TEST_SOURCES    := $(wildcard test/*.c)
 LIBRARY_OBJECTS := $(LIBRARY_SOURCES:%.c=$(OBJ)/%.o)
 VENDOR_OBJECTS  := $(VENDOR_SOURCES:%.c=$(OBJ)/%.o)
 PROGRAM_OBJECTS := $(PROGRAM_SOURCES:%.c=$(OBJ)/%.o)
-TEST_OBJECTS    := $(TEST_SOURCES:%.c=$(OBJ)/%.o)
+TEST_BINARIES   := $(TEST_SOURCES:test/%.c=$(BUILD)/%)
 
 LIBRARY := $(BUILD)/libpapri.a
 PROGRAM := $(BUILD)/papri
-TESTS   := $(BUILD)/test_papri
 
 .PHONY: all test lint normalform check vendor-check asan compiledb clean
 
@@ -67,9 +66,10 @@ $(PROGRAM): $(PROGRAM_OBJECTS) $(LIBRARY)
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -o $@ $(PROGRAM_OBJECTS) $(LIBRARY)
 
-$(TESTS): $(TEST_OBJECTS) $(LIBRARY)
+# One binary per test file, so each keeps its own main.
+$(BUILD)/test_%: $(OBJ)/test/test_%.o $(LIBRARY)
 	@mkdir -p $(dir $@)
-	$(CC) $(LDFLAGS) -o $@ $(TEST_OBJECTS) $(LIBRARY)
+	$(CC) $(LDFLAGS) -o $@ $< $(LIBRARY)
 
 $(OBJ)/vendor/%.o: vendor/%.c
 	@mkdir -p $(dir $@)
@@ -79,9 +79,13 @@ $(OBJ)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
-test: $(TESTS)
-	./$(TESTS)
-
+test: $(TEST_BINARIES)
+	@status=0; \
+	for binary in $(TEST_BINARIES); do \
+	  echo "== $$binary"; \
+	  ./$$binary || status=1; \
+	done; \
+	exit $$status
 # A hand-rolled reclamation scheme needs these; neither sibling repo has them.
 asan:
 	@$(MAKE) --no-print-directory clean
@@ -133,7 +137,7 @@ vendor-check:
 check: lint normalform vendor-check test
 
 compiledb:
-	bear -- $(MAKE) -B all $(TESTS)
+	bear -- $(MAKE) -B all $(TEST_BINARIES)
 
 clean:
 	rm -rf $(BUILD)
