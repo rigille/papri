@@ -21,12 +21,18 @@ F
 
 ## What makes it modern rather than nostalgic
 
-**Immutable buffers.** A byte sequence backed by an RRB tree of 64-byte,
-cache-line-aligned chunks. Every version is retained, so a background job
-holds a stable snapshot and can say which version its answer belongs to.
-Memory is reclaimed by walking the difference between a retired version and
-its successor — no reference counts, which is just as well, because a
-headerless 64-byte leaf has nowhere to put one.
+**Immutable buffers.** A byte sequence backed by an RRB tree with 256-byte
+leaves, sized the way immer sizes its own. Every version is retained, so a
+background job holds a stable snapshot and can say which version its answer
+belongs to. Leaves are headerless, which is what puts papri's memory
+overhead at 8% where immer pays 10.1% — and which rules out reference
+counting, since there is nowhere to put the count.
+
+Reclamation is a conservative tracing collector (Boehm). It was going to be
+a walk of the difference between a retired version and its successor; that
+turned out to be unsound for a *set* of dead roots, which is what every edit
+produces, and `CLAUDE.md` records the argument so it does not come back. The
+collector is the thing the walk could not be: it sees every root at once.
 
 **Async IO.** One `io_uring`, one thread, blocking in exactly one place.
 Output is strictly serialized at command boundaries, so a job's result never

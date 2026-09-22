@@ -6,20 +6,23 @@
 #include "pool.h"
 #include "rope.h"
 
-/* The version history, and the only place memory is ever given back.
+/* The version history, and the only place a version is ever dropped.
  *
- * History is strictly linear and retired oldest first. That is what makes
- * the cheap reclamation sound: everything reachable from v(k+2) is either
- * fresh or reachable from v(k+1), so by induction the nodes reachable from
- * the oldest version and not from its successor are reachable from no
- * surviving version at all.
+ * History is strictly linear and retired oldest first. Retiring a version
+ * does not free anything — it clears the slot, and the collector takes the
+ * nodes that no surviving version still reaches. That division of labour is
+ * the point: this module decides WHICH versions papri keeps, and never has
+ * to work out which nodes that implies. Working it out is what the pairwise
+ * diff walk tried to do, and it got the answer wrong; see CLAUDE.md, "The
+ * shortcut that does not work".
  *
  * The one thing that can hold a version alive besides the history is an
  * async job that took a snapshot. Those are counted as PINS, per version,
  * not per node — there are tens of versions and millions of nodes, and that
- * asymmetry is the whole reason this is cheaper than reference counting. A
- * pin does not complicate the diff; it simply stops the retirement frontier
- * from advancing past it.
+ * asymmetry is why this is cheaper than reference counting. A pin stops the
+ * retirement frontier from advancing past it, and since the history slot is
+ * what holds the reference, the pin is also what keeps the collector's
+ * hands off the snapshot.
  */
 
 #define HISTORY_CAPACITY 64
@@ -33,7 +36,6 @@ typedef struct History {
     Version  versions[HISTORY_CAPACITY];
     uint32_t first;
     uint32_t count;
-    uint32_t leaked;    /* retirements whose diff was too wide to walk */
 } History;
 
 /* ── Abstract predicates ────────────────────────────────────────────────────
@@ -53,21 +55,22 @@ void history_initialize(History *history);
 /* requires: history(history, versions); node_pool(pool, live, residual);
  *           rope(version, bytes, share) derived from the newest version.
  * ensures:  history(history, versions ++ [version]). When the window was
- *           already full, the oldest unpinned version is retired first and
- *           its unshared nodes returned to the pool. The result is 1, or 0
+ *           already full, the oldest unpinned version is retired first,
+ *           which makes its unshared nodes collectable. The result is 1, or 0
  *           when the window is full of pinned versions and the new one
  *           cannot be recorded.
  */
 int history_push(History *history, Pool *pool, const Rope *version);
 
-/* requires: history(history, versions); node_pool(pool, live, residual).
+/* requires: history(history, versions); node_pool(pool, allocated).
  * ensures:  when there are at least two versions and the oldest is unpinned,
- *           history(history, versions minus its first), every node reachable
- *           from the retired version but not from its successor is returned
- *           to the pool, and the result is 1. Otherwise nothing changes and
- *           the result is 0 — in particular a pinned oldest version stalls
- *           the frontier, which is exactly what keeps an async snapshot
- *           readable.
+ *           history(history, versions minus its first) and the result is 1;
+ *           the retired version's reference is dropped, so every node it
+ *           alone reached becomes collectable — though not necessarily
+ *           collected, which happens whenever the collector next runs.
+ *           Otherwise nothing changes and the result is 0 — in particular a
+ *           pinned oldest version stalls the frontier, which is exactly what
+ *           keeps an async snapshot readable.
  */
 int history_retire_oldest(History *history, Pool *pool);
 
@@ -88,14 +91,6 @@ int history_unpin(History *history, uint32_t index);
  *           memory is written.
  */
 uint32_t history_count(const History *history);
-
-/* requires: history(history, versions).
- * ensures:  history(history, versions); the result is how many retirements
- *           had to leak because the difference was too wide to walk within
- *           bounded memory. Should be 0; worth asserting in tests. No
- *           memory is written.
- */
-uint32_t history_leaked(const History *history);
 
 /* requires: history(history, versions); index counts from 0 at the oldest.
  * ensures:  history(history, versions); *out holds that version and the

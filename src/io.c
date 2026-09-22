@@ -92,8 +92,20 @@ int io_wait(IoLoop *loop, IoCompletion *completion)
     uint32_t             pending;
     int                  outcome;
 
+    /* A signal turns the wait into -EINTR with no completion consumed. The
+     * old code read any negative outcome as "nothing arrived" and returned
+     * 0, which retires the loop and strands the read that was in flight —
+     * its completion never seen, `pending` never decremented, and a `q`
+     * that waits for outstanding work hanging forever. Nothing in a
+     * single-threaded papri sends signals today, so it never fired; a
+     * second thread would make the collector's stop-the-world do it on the
+     * first collection during a read. Retry instead. */
     entry = NULL;
     outcome = io_uring_wait_cqe(&loop->ring, &entry);
+    while (outcome == -EINTR) {
+        entry = NULL;
+        outcome = io_uring_wait_cqe(&loop->ring, &entry);
+    }
     if (outcome < 0) {
         return 0;
     }

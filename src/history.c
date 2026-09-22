@@ -24,18 +24,6 @@ void history_initialize(History *history)
 {
     history->first = 0;
     history->count = 0;
-    history->leaked = 0;
-}
-
-/* requires: history(history, versions).
- * ensures:  as history.h.
- */
-uint32_t history_leaked(const History *history)
-{
-    uint32_t total;
-
-    total = history->leaked;
-    return total;
 }
 
 /* requires: history(history, versions).
@@ -113,7 +101,7 @@ int history_unpin(History *history, uint32_t index)
     return 1;
 }
 
-/* requires: history(history, versions); node_pool(pool, live, residual).
+/* requires: history(history, versions); node_pool(pool, allocated).
  * ensures:  as history.h.
  */
 int history_retire_oldest(History *history, Pool *pool)
@@ -132,9 +120,9 @@ int history_retire_oldest(History *history, Pool *pool)
     first = history->first;
     slot = slot_of(first, 0);
 
-    /* A pinned version stalls the frontier. An async job holding a snapshot
-     * holds a share of its nodes, and the pool cannot take back a node while
-     * any share of it is outstanding. */
+    /* A pinned version stalls the frontier. The history slot is what holds
+     * the reference to a snapshot's nodes, so dropping it while a job still
+     * wants it would hand those nodes to the collector. */
     pins = history->versions[slot].pins;
     if (pins > 0) {
         return 0;
@@ -142,9 +130,10 @@ int history_retire_oldest(History *history, Pool *pool)
 
     next_slot = slot_of(first, 1);
 
-    /* The version leaves the history, but its nodes are not reclaimed:
-     * nothing collects them yet. The walk that used to do it was removed
-     * as unsound; see the commit that took it out. */
+    /* Clearing the slot is the whole of the reclamation. Whatever the
+     * retired version alone reached is now unreachable, and the collector
+     * finds it without being told where to look — which is precisely what
+     * the diff walk could not do correctly for a set of dead roots. */
     (void)pool;
 
     rope_initialize_empty(&history->versions[slot].text);

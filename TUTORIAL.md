@@ -478,15 +478,14 @@ discovering them:
 - **No regular expressions.** `/text/`, `g/text/` and `s/pat/rep/` all match
   literal bytes.
 - **No undo command.** Every version of the buffer is retained internally,
-  and that is what makes background snapshots and reclamation work — but no
-  verb exposes it yet. Write before you experiment.
+  which is what makes background snapshots work — but no verb exposes it
+  yet. Write before you experiment.
 - **`.` does not follow your edits.** It is the current line, but no command
   moves it; it starts at line 1 and is only clamped when the buffer shrinks.
   Address lines explicitly.
 - **`q` does not warn about unsaved changes.** It quits.
 - **Addresses do not compose arbitrarily.** There is no `/start/,/end/`.
 - **One grammar at a time**, chosen by environment variable, not per buffer.
-- **Buffers are limited to 4 GiB** and addresses are 32-bit.
 
 ## Command reference
 

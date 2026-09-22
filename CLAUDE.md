@@ -217,10 +217,12 @@ Three consequences worth stating, because they are what the design rests on:
   enforced by the logic rather than remembered by convention. A background job
   holding a snapshot holds a share; you therefore cannot free under it.
 - **Shares are ghost state** with no runtime footprint. They say *when* freeing
-  is permitted; they cannot find the nodes. That is the diff walk's job. The
-  obligation tying the two together, to be written down now and proved later:
-  *the diff walk returns exactly the nodes whose shares have rejoined to the
-  full share.*
+  is permitted; they cannot find the nodes. Finding them is the collector's
+  job now — see below — and the obligation tying the two together, to be
+  written down now and proved later: *the collector frees exactly the nodes
+  whose shares have rejoined to the full share.* Conservatism weakens this to
+  an inclusion in one direction, which is the sound direction: everything
+  freed has a full share, but not everything with a full share is freed.
 - **Fix a scheme for how a node's share divides** among k referents rather than
   letting it be ad hoc. VST shares are infinitely divisible so there is no
   overflow hazard, but arbitrary lattice elements mean share arithmetic in every
@@ -243,9 +245,54 @@ corrupted.
 
 Expanding the live side fully restores soundness and costs a walk of every
 surviving node per edit, which is the thing the design existed to avoid. So
-the walk was removed and papri leaks until the collector is wired in. If you
-are tempted to reintroduce a pairwise diff, the question to answer first is
-how it records liveness for a subtree it pruned.
+the walk was removed. If you are tempted to reintroduce a pairwise diff, the
+question to answer first is how it records liveness for a subtree it pruned.
+
+## Memory comes from a conservative collector
+
+papri uses Boehm-Demers-Weiser, behind `src/collector.h`. The reasoning for
+that choice over CertiCoq's verified collector is in `flake.nix` beside the
+input that still packages CertiCoq's; the short version is that CertiGC is a
+batch collector for programs that terminate, and an editor does not.
+
+What matters when writing code here is that the collector is **conservative**
+and **non-moving**, and both halves have consequences you must respect.
+
+Non-moving means addresses are stable, so nothing special is needed to hold a
+node: an ordinary C pointer, anywhere the collector scans, keeps it alive.
+
+Conservative means the collector decides reachability by reading memory and
+treating anything that looks like a heap address as one. Three rules follow,
+and breaking any of them is a use-after-free that will not reproduce:
+
+- **Anything holding a node pointer must live somewhere scanned.** That is the
+  stack, the registers, the data segment, and blocks from `pool_allocate`.
+  It is NOT `malloc`. A `malloc`'d array of node pointers is invisible, and
+  the tree it holds will be collected out from under it — which is exactly
+  what `rope_from_bytes` and `line_index_build` used for their bottom-up
+  scaffolding, and why they use `pool_allocate` now. If you write a temporary
+  that holds nodes, it comes from the pool.
+
+- **Anything that is not pointers must be atomic.** `pool_allocate_atomic`
+  returns memory the collector never reads. Rope leaves use it because 256
+  bytes of file content is 32 words of accidental candidate pointers, and any
+  one of them landing in the heap pins a dead node for as long as the leaf
+  lives. Text, buffers, and measure arrays go here; anything holding a node
+  does not.
+
+- **False retention is the acceptable failure; use-after-free is not.** A
+  `size_t` in a node's size table can read as a heap address and hold one dead
+  object alive. That is the error going in the safe direction, and it is the
+  price of not rewriting the rope around a precise collector's object model.
+  Do not "fix" it by tagging integers.
+
+One more, for later: papri runs on one thread, and a single-threaded Boehm
+never signals anybody. A second thread changes three things together, and
+they have to move together — define `GC_THREADS` in `src/collector.c` (which
+also redirects `dlopen`, and `src/structure.c` dlopens grammars), create
+every thread through `pthread_create` so the collector learns its stack, and
+make sure every blocking syscall retries on `EINTR`, because stop-the-world
+suspends threads with a signal.
 
 ## Build
 
