@@ -1,5 +1,8 @@
 # papri
 
+> WARNING: this software is work in progress and will probably change a lot.
+> Please don't use it.
+
 A modernized `ed`.
 
 It keeps `ed`'s essential property — no terminal control, no cursor
