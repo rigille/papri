@@ -20,7 +20,7 @@
  * the whole design work; see CLAUDE.md § Shares.
  */
 
-#define ROPE_LEAF_BYTES 64
+#define ROPE_LEAF_BYTES 256
 #define ROPE_BRANCHING  32
 #define ROPE_MAX_HEIGHT 16
 

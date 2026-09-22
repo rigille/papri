@@ -150,28 +150,32 @@ static void test_hex_view(void)
  */
 static void test_codepoint_across_a_leaf_boundary(void)
 {
-    unsigned char source[200];
+    unsigned char source[ROPE_LEAF_BYTES * 2];
+    char          expected[64];
     Rope          rope;
     size_t        index;
     size_t        length;
+    size_t        boundary;
     int           before;
     int           ok;
 
     before = failures;
 
-    /* Fill so that U+20AC (E2 82 AC) begins at offset 63 — one byte before
-     * the end of the first leaf, so its continuation bytes land in the
-     * next one. */
+    /* Put U+20AC (E2 82 AC) one byte before the end of the first leaf, so
+     * its continuation bytes land in the next one. Written against
+     * ROPE_LEAF_BYTES rather than a number, because the leaf size is a
+     * decision that moves — it has already moved once. */
+    boundary = ROPE_LEAF_BYTES - 1;
     index = 0;
-    while (index < 63) {
+    while (index < boundary) {
         source[index] = 0x61;
         index = index + 1;
     }
-    source[63] = 0xE2;
-    source[64] = 0x82;
-    source[65] = 0xAC;
-    source[66] = 0x0A;
-    length = 67;
+    source[boundary] = 0xE2;
+    source[boundary + 1] = 0x82;
+    source[boundary + 2] = 0xAC;
+    source[boundary + 3] = 0x0A;
+    length = boundary + 4;
 
     ok = rope_from_bytes(&pool, source, length, &rope);
     expect(ok == 1, "the straddling rope is built");
@@ -185,9 +189,12 @@ static void test_codepoint_across_a_leaf_boundary(void)
     view_write_codepoints(&rope, 0, length);
     capture_end();
 
-    expect(captured_has("63\tU+20AC\t3 byte(s)"),
+    snprintf(expected, sizeof(expected), "%zu\tU+20AC\t3 byte(s)", boundary);
+    expect(captured_has(expected),
            "the straddling code point decodes, at the right offset");
-    expect(captured_has("66\tU+000A"), "decoding continues past it");
+
+    snprintf(expected, sizeof(expected), "%zu\tU+000A", boundary + 3);
+    expect(captured_has(expected), "decoding continues past it");
 
     report("a code point straddling a leaf boundary still decodes", before);
 }
