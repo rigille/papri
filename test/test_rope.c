@@ -145,32 +145,133 @@ static void model_replace(size_t start, size_t end,                          con
     model_length = new_length;
 }
 
-/* requires: node_pool(pool, live, residual).
- * ensures:  `failures` counts the pool alignment guarantees that did not
- *           hold. The rope relies on this: a leaf is one cache line and must
- *           never straddle two.
+/* The pool once promised 64-byte alignment, because a leaf was exactly one
+ * cache line and must not straddle two. Leaves are 256 bytes now and the
+ * collector aligns to 16, so that assertion went with the constant it was
+ * about. What is still promised, and what the rope does depend on, is that
+ * a block comes back zeroed and distinct from every other live block.
+ *
+ * requires: node_pool(pool, allocated).
+ * ensures:  `failures` counts the pool guarantees that did not hold.
  */
-static void test_pool_alignment(void)
+static void test_pool_hands_out_distinct_zeroed_blocks(void)
 {
-    size_t    index;
-    void     *block;
-    uintptr_t address;
-    uintptr_t remainder;
-    int       before;
+    static unsigned char *blocks[200];
+    size_t                index;
+    size_t                other;
+    size_t                byte;
+    unsigned char        *block;
+    unsigned char         value;
+    int                   before;
 
     before = failures;
     index = 0;
     while (index < 200) {
-        block = pool_allocate(&pool, ROPE_LEAF_BYTES);
+        block = pool_allocate_atomic(&pool, ROPE_LEAF_BYTES);
         expect(block != NULL, "the pool hands out a leaf");
-        /* A pointer-to-integer cast, which the subset forbids in shipped
-         * code. Tests are where the alignment guarantee gets checked. */
-        address = (uintptr_t)block;
-        remainder = address % POOL_ALIGNMENT;
-        expect(remainder == 0, "every allocation is cache-line aligned");
+        blocks[index] = block;
+
+        byte = 0;
+        while (byte < ROPE_LEAF_BYTES) {
+            value = block[byte];
+            expect(value == 0, "a fresh leaf is zeroed");
+            byte = byte + 1;
+        }
+
+        /* Write a signature, so overlap with an earlier block shows up. */
+        block[0] = (unsigned char)(index + 1);
         index = index + 1;
     }
-    report("pool allocations are cache-line aligned", before);
+
+    index = 0;
+    while (index < 200) {
+        block = blocks[index];
+        value = block[0];
+        expect(value == (unsigned char)(index + 1),
+               "a live block is not handed out twice");
+        other = index + 1;
+        while (other < 200) {
+            expect(blocks[other] != block, "blocks are distinct");
+            other = other + 1;
+        }
+        index = index + 1;
+    }
+    report("the pool hands out distinct zeroed blocks", before);
+}
+
+/* The executable form of the obligation in CLAUDE.md: memory a version no
+ * longer reaches comes back. The diff walk that used to do this was removed
+ * for being unsound on a set of dead roots; the collector replaced it, and
+ * this is what says the replacement works.
+ *
+ * The test builds a rope, drops it, collects, and repeats — many times over.
+ * If nothing is reclaimed the heap grows without bound and the assertion
+ * fires. The bound is deliberately loose: a conservative collector may
+ * retain a little, and this is asserting that reclamation happens at all,
+ * not that it is perfect.
+ *
+ * requires: node_pool(pool, allocated).
+ * ensures:  `failures` counts the rounds in which the heap grew.
+ */
+static void test_dead_versions_are_reclaimed(void)
+{
+    static uint8_t source[65536];
+    Rope           rope;
+    size_t         index;
+    size_t         round;
+    size_t         settled;
+    size_t         now_live;
+    size_t         allowed;
+    int            ok;
+    int            before;
+
+    before = failures;
+
+    index = 0;
+    while (index < 65536) {
+        source[index] = (uint8_t)(index % 251);
+        if (index % 61 == 0) {
+            source[index] = 0x0A;
+        }
+        index = index + 1;
+    }
+
+    /* One round first, so the heap reaches the size a single version needs
+     * and the measurement is not dominated by the collector growing into
+     * its working set. */
+    ok = rope_from_bytes(&pool, source, 65536, &rope);
+    expect(ok == 1, "the warm-up rope builds");
+    rope_initialize_empty(&rope);
+    pool_collect(&pool);
+    settled = pool_live(&pool);
+
+    round = 0;
+    while (round < 24) {
+        ok = rope_from_bytes(&pool, source, 65536, &rope);
+        expect(ok == 1, "each round's rope builds");
+        /* The only reference goes away here. Nothing else holds the tree:
+         * not the pool, which owns nothing, and not a history. */
+        rope_initialize_empty(&rope);
+        round = round + 1;
+    }
+
+    pool_collect(&pool);
+    now_live = pool_live(&pool);
+
+    /* 24 rounds allocated about 1.6 MB of rope. Without reclamation the
+     * heap would have to hold all of it; allow twice one version's worth. */
+    allowed = settled * 2;
+    if (allowed < 262144) {
+        allowed = 262144;
+    }
+    expect(now_live <= allowed,
+           "dropped versions do not accumulate in the heap");
+
+    printf("     one version settles at %zu bytes; after 24 built and "
+           "dropped, %zu\n", settled, now_live);
+    printf("     the pool asked for %zu bytes in total\n",
+           pool_handed_out(&pool));
+    report("dead versions are reclaimed", before);
 }
 
 /* requires: node_pool(pool, live, residual).
@@ -505,7 +606,8 @@ int main(void)
         return 1;
     }
 
-    test_pool_alignment();
+    test_pool_hands_out_distinct_zeroed_blocks();
+    test_dead_versions_are_reclaimed();
     test_from_bytes_round_trip();
     test_split_then_concat_is_identity();
     test_random_edits_track_the_model();

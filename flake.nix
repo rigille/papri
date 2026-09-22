@@ -5,6 +5,16 @@
 
   # The CertiCoq generational collector, as carried by CertiGraph. Only the
   # C is built here; the Coq development that proves it is not.
+  #
+  # Packaged but NOT linked. It is a verified collector, which is the reason
+  # to want it, and the wrong shape for a long-running editor, which is the
+  # reason papri uses Boehm instead: its generation count is bounded, it has
+  # no way to collect the oldest generation (its own author's REMARK at the
+  # foot of gc.c says so), and it calls exit(1) when it runs out. That is
+  # fine for a CertiCoq program, which computes an answer and stops. An
+  # editor open for a week is the case it was not written for. Kept here
+  # because the day it grows an oldest-generation collection it becomes the
+  # better choice, and because the packaging is the hard part to redo.
   inputs.certigraph.url =
     "github:CertiGraph/CertiGraph/8781550d8a116abb03ac7931f271ce03a5158a74";
   inputs.certigraph.flake = false;
@@ -55,7 +65,7 @@
       src     = ./.;
 
       nativeBuildInputs = [ pkgs.gnumake pkgs.clang pkgs.pkg-config ];
-      buildInputs = [ pkgs.liburing pkgs.tree-sitter ];
+      buildInputs = [ pkgs.liburing pkgs.tree-sitter pkgs.boehmgc ];
 
       # clightgen is deliberately absent here: `nix build` produces the binary,
       # `nix flake check` runs the subset gate. Keeping them apart means a
@@ -93,7 +103,8 @@
         buildInputs = [
           pkgs.liburing
           pkgs.tree-sitter
-          (certigcFor pkgs)      # the collector, to link and to read
+          pkgs.boehmgc           # the collector papri actually uses
+          (certigcFor pkgs)      # CertiCoq's, packaged to read, not linked
         ];
 
         shellHook = ''
@@ -137,7 +148,7 @@
           pkgs.gnumake pkgs.clang pkgs.pkg-config
           pkgs.coqPackages.compcert pkgs.diffutils
         ];
-        buildInputs = [ pkgs.liburing pkgs.tree-sitter ];
+        buildInputs = [ pkgs.liburing pkgs.tree-sitter pkgs.boehmgc ];
       } ''
         cp -r ${./.} source
         chmod -R u+w source

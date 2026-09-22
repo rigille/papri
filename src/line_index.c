@@ -234,13 +234,13 @@ int line_index_build(Pool *pool, const Rope *rope, LineIndex *index)
         leaf_count = leaf_count + 1;
     }
 
-    nodes = malloc(leaf_count * sizeof(void *));
-    bytes = malloc(leaf_count * sizeof(size_t));
-    newlines = malloc(leaf_count * sizeof(size_t));
+    /* From the pool, not from malloc: `nodes` holds the only reference to
+     * every index node built so far, and the collector does not scan
+     * malloc'd memory. The two measure arrays hold no pointers. */
+    nodes = pool_allocate(pool, leaf_count * sizeof(void *));
+    bytes = pool_allocate_atomic(pool, leaf_count * sizeof(size_t));
+    newlines = pool_allocate_atomic(pool, leaf_count * sizeof(size_t));
     if (nodes == NULL || bytes == NULL || newlines == NULL) {
-        free(nodes);
-        free(bytes);
-        free(newlines);
         return 0;
     }
 
@@ -249,9 +249,6 @@ int line_index_build(Pool *pool, const Rope *rope, LineIndex *index)
     while (position < total) {
         leaf = allocate_node(pool, 0);
         if (leaf == NULL) {
-            free(nodes);
-            free(bytes);
-            free(newlines);
             return 0;
         }
 
@@ -288,9 +285,6 @@ int line_index_build(Pool *pool, const Rope *rope, LineIndex *index)
     }
 
     ok = build_levels(pool, nodes, bytes, newlines, leaf_count, 0, index);
-    free(nodes);
-    free(bytes);
-    free(newlines);
     return ok;
 }
 

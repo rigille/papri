@@ -77,15 +77,21 @@ static size_t node_child_bytes(const RopeNode *node, uint32_t index)
     return current - previous;
 }
 
-/* requires: node_pool(pool, live, residual).
- * ensures:  node_pool(pool, live', residual) with one fresh leaf, and the
- *           result points at it; or the result is null.
+/* Atomic, not scanned. A leaf is ROPE_LEAF_BYTES of file content; scanning
+ * it would read 32 arbitrary words as candidate pointers, and any one that
+ * happened to land inside the heap would hold a dead node alive. Text is
+ * exactly the kind of data a conservative collector must be told to ignore.
+ *
+ * requires: node_pool(pool, allocated).
+ * ensures:  node_pool(pool, allocated + ROPE_LEAF_BYTES) with one fresh
+ *           zeroed leaf that the collector never scans, and the result
+ *           points at it; or the result is null.
  */
 static unsigned char *allocate_leaf(Pool *pool)
 {
     void *allocation;
 
-    allocation = pool_allocate(pool, ROPE_LEAF_BYTES);
+    allocation = pool_allocate_atomic(pool, ROPE_LEAF_BYTES);
     return allocation;
 }
 
@@ -971,12 +977,15 @@ int rope_from_bytes(Pool *pool, const unsigned char *bytes, size_t length,
         leaf_total = leaf_total + 1;
     }
 
-    /* Transient scaffolding for the bottom-up build, not part of the tree. */
-    nodes = malloc(leaf_total * sizeof(void *));
-    sizes = malloc(leaf_total * sizeof(size_t));
+    /* Transient scaffolding for the bottom-up build, not part of the tree —
+     * but it must come from the pool, not from malloc. While this loop runs,
+     * `nodes` holds the ONLY reference to every leaf and every node built so
+     * far, and malloc'd memory is not scanned: a collection triggered by the
+     * next allocate_leaf would free the tree being built out from under it.
+     * `sizes` holds no pointers, so it is atomic. */
+    nodes = pool_allocate(pool, leaf_total * sizeof(void *));
+    sizes = pool_allocate_atomic(pool, leaf_total * sizeof(size_t));
     if (nodes == NULL || sizes == NULL) {
-        free(nodes);
-        free(sizes);
         return 0;
     }
 
@@ -989,9 +998,7 @@ int rope_from_bytes(Pool *pool, const unsigned char *bytes, size_t length,
         }
         leaf = allocate_leaf(pool);
         if (leaf == NULL) {
-            free(nodes);
-            free(sizes);
-                return 0;
+            return 0;
         }
         memcpy(leaf, bytes + offset, chunk);
         nodes[index] = leaf;
@@ -1005,9 +1012,7 @@ int rope_from_bytes(Pool *pool, const unsigned char *bytes, size_t length,
     while (level_count > 1) {
         height = height + 1;
         if (height > ROPE_MAX_HEIGHT) {
-            free(nodes);
-            free(sizes);
-                return 0;
+            return 0;
         }
         read_index = 0;
         write_index = 0;
@@ -1020,9 +1025,7 @@ int rope_from_bytes(Pool *pool, const unsigned char *bytes, size_t length,
             built = make_node(pool, height, nodes + read_index,
                               sizes + read_index, group, &slot_bytes);
             if (built == NULL) {
-                free(nodes);
-                free(sizes);
-                        return 0;
+                return 0;
             }
             built_bytes = slot_bytes;
             nodes[write_index] = built;
@@ -1039,8 +1042,6 @@ int rope_from_bytes(Pool *pool, const unsigned char *bytes, size_t length,
     rope->height = height;
     rope->byte_count = root_bytes;
 
-    free(nodes);
-    free(sizes);
     return 1;
 }
 
@@ -1557,23 +1558,6 @@ int rope_slice(Pool *pool, const Rope *rope, size_t start, size_t end,
     return 1;
 }
 
-/* The pool rounds every allocation up to its alignment, so a measurement
- * that did not would never match pool_live.
- *
- * requires: size > 0.
- * ensures:  the result is what the pool actually spends on it.
- */
-static size_t rounded_size(size_t size)
-{
-    size_t remainder;
-
-    remainder = size % POOL_ALIGNMENT;
-    if (remainder == 0) {
-        return size;
-    }
-    return size + (POOL_ALIGNMENT - remainder);
-}
-
 /* requires: holds a read share of the subtree at `node`.
  * ensures:  the read share is returned; the result is the pool memory that
  *           subtree occupies.
@@ -1588,12 +1572,12 @@ static size_t measure_node(const void *node, uint32_t height)
     size_t          deeper;
 
     if (height == 0) {
-        return rounded_size(ROPE_LEAF_BYTES);
+        return ROPE_LEAF_BYTES;
     }
 
     source = node;
     count = source->child_count;
-    total = rounded_size(sizeof(RopeNode));
+    total = sizeof(RopeNode);
     index = 0;
     while (index < count) {
         child = source->children[index];

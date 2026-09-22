@@ -1,3 +1,4 @@
+#include "collector.h"
 #include "command.h"
 #include "io.h"
 
@@ -89,6 +90,11 @@ int main(int argc, char **argv)
     uint32_t     outstanding;
     int          ok;
     int          running;
+
+    /* Before anything else allocates. The collector finds its roots by
+     * scanning the stack, the registers and the data segment, and it wants
+     * this frame to be the bottom of the stack it scans. */
+    collector_initialize();
 
     ok = editor_initialize(&editor);
     if (ok == 0) {

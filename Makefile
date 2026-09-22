@@ -11,7 +11,16 @@ URING_SYSTEM := $(URING_CFLAGS:-I%=-isystem %)
 # time, so only the library itself is linked.
 TS_CFLAGS := $(shell pkg-config --cflags tree-sitter 2>/dev/null)
 TS_LIBS   := $(shell pkg-config --libs tree-sitter 2>/dev/null || echo -ltree-sitter)
-TS_SYSTEM := $(TS_CFLAGS:-I%=-isystem %)# papri — see CLAUDE.md for the rules this build enforces.
+TS_SYSTEM := $(TS_CFLAGS:-I%=-isystem %)
+
+# The garbage collector, the third foreign boundary. src/collector.c is the
+# only file that includes gc.h; everything else sees src/collector.h, which
+# is plain C and stays inside the subset.
+GC_CFLAGS := $(shell pkg-config --cflags bdw-gc 2>/dev/null)
+GC_LIBS   := $(shell pkg-config --libs bdw-gc 2>/dev/null || echo -lgc)
+GC_SYSTEM := $(GC_CFLAGS:-I%=-isystem %)
+
+# papri — see CLAUDE.md for the rules this build enforces.
 
 CC    ?= clang
 AR    ?= ar
@@ -59,6 +68,11 @@ IO_CFLAGS := -std=gnu17 $(COPT) -Wall -Wextra $(INCLUDE) $(URING_SYSTEM) \
 STRUCTURE_CFLAGS := -std=gnu17 $(COPT) -Wall -Wextra $(INCLUDE) $(TS_SYSTEM) \
                     -fno-common
 
+# And for the collector boundary. gc.h declares its allocators with
+# __attribute__((malloc, alloc_size)), which -Wpedantic -Werror will not have.
+COLLECTOR_CFLAGS := -std=gnu17 $(COPT) -Wall -Wextra $(INCLUDE) $(GC_SYSTEM) \
+                    -fno-common
+
 # Vendored verified code is exempt from the subset and from -Werror. It has a
 # machine-checked proof instead of our proxy for one; see vendor/utf8/README.md.
 VENDOR_CFLAGS := $(CSTD) $(COPT) -Wall -Wextra $(INCLUDE) -fno-common
@@ -66,7 +80,7 @@ VENDOR_CFLAGS := $(CSTD) $(COPT) -Wall -Wextra $(INCLUDE) -fno-common
 # Compile-only warning flags are unused at link time, and -Werror turns
 # "argument unused during compilation" into an error. Link without them.
 LDFLAGS := $(CSTD) $(COPT)
-LDLIBS  := $(URING_LIBS) $(TS_LIBS) -ldl
+LDLIBS  := $(URING_LIBS) $(TS_LIBS) $(GC_LIBS) -ldl
 
 LIBRARY_SOURCES := $(wildcard src/*.c)
 LIBRARY_SOURCES := $(filter-out src/main.c,$(LIBRARY_SOURCES))
@@ -107,6 +121,10 @@ $(OBJ)/src/structure.o: src/structure.c
 	@mkdir -p $(dir $@)
 	$(CC) $(STRUCTURE_CFLAGS) -MMD -MP -c -o $@ $<
 
+$(OBJ)/src/collector.o: src/collector.c
+	@mkdir -p $(dir $@)
+	$(CC) $(COLLECTOR_CFLAGS) -MMD -MP -c -o $@ $<
+
 $(OBJ)/vendor/%.o: vendor/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(VENDOR_CFLAGS) -MMD -MP -c -o $@ $<
@@ -122,11 +140,17 @@ test: $(TEST_BINARIES)
 	  ./$$binary || status=1; \
 	done; \
 	exit $$status
-# A hand-rolled reclamation scheme needs these; neither sibling repo has them.
 # Built into its own directory: a sanitized object file cannot be linked by
 # an ordinary build, so the two trees must not share one.
+#
+# detect_stack_use_after_return must stay off. It moves locals onto a "fake
+# stack" off to the side, and the collector finds its roots by scanning the
+# real one — a rope root living in a fake frame would be invisible, and the
+# tree under it would be collected while still in use. The sanitizer would
+# be creating the bug it is there to find.
 asan:
-	@$(MAKE) --no-print-directory test BUILD=$(BUILD)/asan \
+	@ASAN_OPTIONS=detect_stack_use_after_return=0 \
+	 $(MAKE) --no-print-directory test BUILD=$(BUILD)/asan \
 	    COPT="-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined \
 	          -fno-sanitize-recover=all"
 
@@ -141,13 +165,16 @@ lint:
 # clightgen gate: the source is already in the program logic's normal form,
 # and no struct crosses a function boundary by value. vendor/ is exempt.
 # See tools/check_clight.sh.
-# Two files cannot go through this gate, both foreign boundaries kept
-# deliberately thin and both still covered by `make lint`:
+# Three files cannot go through this gate, all foreign boundaries kept
+# deliberately thin and all still covered by `make lint`:
 #   src/io.c        liburing.h reaches stdatomic.h; CompCert stops at _Atomic
 #   src/structure.c tree-sitter and dlfcn, same story
-# See src/io.h and src/structure.h.
-NORMALFORM_SOURCES := $(filter-out src/io.c src/structure.c,$(LIBRARY_SOURCES)) \
-                      $(PROGRAM_SOURCES)
+#   src/collector.c gc.h, whose allocator attributes CompCert will not parse
+# See src/io.h, src/structure.h and src/collector.h. Each is a handful of
+# wrappers and nothing else, which is the price of the exemption: everything
+# that reasons lives on our side of the boundary, inside the gate.
+NORMALFORM_SOURCES := $(filter-out src/io.c src/structure.c src/collector.c,\
+                      $(LIBRARY_SOURCES)) $(PROGRAM_SOURCES)
 
 NORMALFORM := $(BUILD)/normalform
 
