@@ -35,7 +35,7 @@
 typedef struct BufferSlot {
     Rope     text;
     History  history;
-    uint32_t current_line;
+    size_t   current_line;
     uint32_t serial;
     int      modified;
     int      used;
@@ -56,7 +56,7 @@ typedef struct Job {
     uint32_t       id;
     int            descriptor;
     unsigned char *buffer;
-    uint32_t       capacity;
+    size_t         capacity;
     uint32_t       launched_at;
     char           path[NAME_CAPACITY];
 } Job;
@@ -64,7 +64,7 @@ typedef struct Job {
 typedef struct Editor {
     Pool       pool;          /* shared by every buffer */
     BufferSlot slots[BUFFER_CAPACITY];
-    uint32_t   current;
+    size_t     current;
     History  history;
     Rope     text;
     IoLoop    *loop;
@@ -72,7 +72,7 @@ typedef struct Editor {
     Job      jobs[JOB_CAPACITY];
     uint32_t next_job_id;
     uint32_t serial;
-    uint32_t current_line;
+    size_t   current_line;
     int      modified;
     int      quit;
     char     name[NAME_CAPACITY];
@@ -137,7 +137,7 @@ int editor_list_definitions(Editor *editor);
  *           and name live, and the result 1; or no such buffer and the
  *           result is 0. An unused slot becomes an empty buffer.
  */
-int editor_select_buffer(Editor *editor, uint32_t index);
+int editor_select_buffer(Editor *editor, size_t index);
 
 /* requires: editor(editor).
  * ensures:  editor(editor); one line per buffer in use is written, the
@@ -149,7 +149,7 @@ void editor_report_buffers(Editor *editor);
  * ensures:  editor(editor); the result is the lowest unused buffer index, or
  *           BUFFER_CAPACITY when they are all in use. No memory is written.
  */
-uint32_t editor_free_buffer(const Editor *editor);
+size_t editor_free_buffer(const Editor *editor);
 
 /* requires: editor(editor); io_loop(loop, pending) which must outlive the
  *           editor.

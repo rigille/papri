@@ -133,7 +133,7 @@ static void test_definitions_are_found(Structure *structure)
         "    return add(1, 2);\n"
         "}\n";
     Rope     rope;
-    uint32_t length;
+    size_t   length;
     int      before;
     int      ok;
 
@@ -168,8 +168,8 @@ static void test_definitions_are_found(Structure *structure)
 static void test_parsing_spans_many_windows(Structure *structure)
 {
     Rope     rope;
-    uint32_t length;
-    uint32_t index;
+    size_t   length;
+    size_t   index;
     int      written;
     int      before;
     int      ok;

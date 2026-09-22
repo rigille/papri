@@ -57,7 +57,7 @@ static void report(const char *name, int before)
  */
 static void build(Pool *target, const char *text, Rope *out)
 {
-    uint32_t length;
+    size_t   length;
     size_t   wanted;
     int      ok;
 
@@ -82,7 +82,7 @@ static void test_retirement_frees_the_difference(void)
     unsigned char replacement[8];
     size_t        live_bytes;
     size_t        occupied;
-    uint32_t      step;
+    size_t        step;
     uint32_t      remaining;
     uint32_t      leaked;
     int           before;
@@ -171,9 +171,9 @@ static void test_a_pin_stalls_the_frontier(void)
     Decomposition foci;
     unsigned char replacement[8];
     unsigned char seen[64];
-    uint32_t      step;
-    uint32_t      count;
-    uint32_t      length;
+    size_t        step;
+    size_t        count;
+    size_t        length;
     int           before;
     int           ok;
     int           same;
@@ -245,7 +245,7 @@ static void test_editor_memory_stays_bounded(void)
     size_t   after_warmup;
     size_t   at_end;
     size_t   growth;
-    uint32_t step;
+    size_t   step;
     int      before;
     int      ok;
 

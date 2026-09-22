@@ -46,15 +46,15 @@ typedef enum AddressKind {
  * becomes two more AddressKinds and the rest of this file does not move. */
 typedef struct Address {
     AddressKind          kind;
-    uint32_t             first;
-    uint32_t             last;
+    size_t               first;
+    size_t               last;
     const unsigned char *pattern;
-    uint32_t             pattern_length;
+    size_t               pattern_length;
 } Address;
 
 typedef struct Span {
-    uint32_t start;
-    uint32_t end;
+    size_t   start;
+    size_t   end;
 } Span;
 
 typedef struct Decomposition {
@@ -83,7 +83,7 @@ typedef struct Decomposition {
  *           DECOMPOSITION_CAPACITY foci, and the outcome is 0.
  */
 int address_resolve(const Rope *rope, const Address *address,
-                    uint32_t current_line, Decomposition *result);
+                    size_t current_line, Decomposition *result);
 
 /* requires: rope(rope, bytes, share); holds a read share of
  *           `pattern_length` bytes at `pattern`, which is non-empty;
@@ -93,9 +93,9 @@ int address_resolve(const Rope *rope, const Address *address,
  *           the earliest such occurrence and the result is 1; otherwise
  *           *found is unchanged and the result is 0.
  */
-int address_find_literal(const Rope *rope, uint32_t from,
-                         const unsigned char *pattern, uint32_t pattern_length,
-                         uint32_t *found);
+int address_find_literal(const Rope *rope, size_t from,
+                         const unsigned char *pattern, size_t pattern_length,
+                         size_t *found);
 
 /* A version must be a TREE, not a DAG: no node may appear twice within one
  * version. The reclamation walk frees each node it reaches exactly once, so
@@ -122,7 +122,7 @@ int address_find_literal(const Rope *rope, uint32_t from,
 int address_replace_all(Pool *pool, const Rope *rope,
                         const Decomposition *decomposition,
                         const unsigned char *replacement,
-                        uint32_t replacement_length,
+                        size_t replacement_length,
                         Rope *result);
 
 /* requires: node_pool(pool, live, residual); rope(rope, bytes, share);
@@ -137,7 +137,7 @@ int address_replace_all(Pool *pool, const Rope *rope,
 int address_insert_all(Pool *pool, const Rope *rope,
                        const Decomposition *decomposition, int before,
                        const unsigned char *insertion,
-                       uint32_t insertion_length,
+                       size_t insertion_length,
                        Rope *result);
 
 #endif /* PAPRI_ADDRESS_H */

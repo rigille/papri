@@ -46,8 +46,8 @@ static void report(const char *name, int before)
  */
 static void expect_buffer(const char *expected, const char *where)
 {
-    uint32_t length;
-    uint32_t total;
+    size_t   length;
+    size_t   total;
     size_t   wanted;
     int      ok;
     int      same;
@@ -58,7 +58,7 @@ static void expect_buffer(const char *expected, const char *where)
 
     if (total != length) {
         failures = failures + 1;
-        printf("  FAIL  %s: buffer is %u bytes, expected %u\n", where, total,
+        printf("  FAIL  %s: buffer is %zu bytes, expected %zu\n", where, total,
                length);
         return;
     }
@@ -98,7 +98,7 @@ static int run(const char *text)
 static void load_text(const char *text)
 {
     Rope     built;
-    uint32_t length;
+    size_t   length;
     size_t   wanted;
     int      ok;
 
@@ -290,8 +290,8 @@ static void test_pattern_addresses(void)
 static void test_old_versions_survive_edits(void)
 {
     Rope     original;
-    uint32_t length;
-    uint32_t after;
+    size_t   length;
+    size_t   after;
     int      before;
     int      ok;
     int      same;

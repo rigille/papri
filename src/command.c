@@ -10,8 +10,8 @@
 
 /* Returned by the parsing helpers when the text did not fit or was
  * malformed, and used as the open end of a `N,$` line range. */
-#define PARSE_FAILED     0xFFFFFFFFu
-#define LINE_RANGE_OPEN  0xFFFFFFFFu
+#define PARSE_FAILED     SIZE_MAX
+#define LINE_RANGE_OPEN  SIZE_MAX
 
 /* Defined below, beside the rest of the job machinery.
  *
@@ -94,9 +94,9 @@ static int is_digit(char value)
  * ensures:  the result is `position` advanced past any run of blanks. No
  *           memory is written.
  */
-static uint32_t skip_blanks(const char *line, uint32_t position)
+static size_t skip_blanks(const char *line, size_t position)
 {
-    uint32_t at;
+    size_t   at;
     char     value;
     int      blank;
 
@@ -118,11 +118,11 @@ static uint32_t skip_blanks(const char *line, uint32_t position)
  *           number and the result is the position past it; otherwise
  *           *value_slot is unchanged and the result is `position`.
  */
-static uint32_t read_number(const char *line, uint32_t position,
-                            uint32_t *value_slot)
+static size_t read_number(const char *line, size_t position,
+                          size_t *value_slot)
 {
-    uint32_t at;
-    uint32_t total;
+    size_t   at;
+    size_t   total;
     char     digit;
     int      ok;
 
@@ -153,12 +153,12 @@ static uint32_t read_number(const char *line, uint32_t position,
  *           delimiter when there was one, and the result is 1; or the text
  *           did not fit and the result is 0.
  */
-static uint32_t read_delimited(const char *line, uint32_t position,
-                               char delimiter, unsigned char *destination,
-                               uint32_t capacity, uint32_t *length_slot)
+static size_t read_delimited(const char *line, size_t position,
+                             char delimiter, unsigned char *destination,
+                             size_t capacity, size_t *length_slot)
 {
-    uint32_t at;
-    uint32_t written;
+    size_t   at;
+    size_t   written;
     char     value;
     char     escaped;
 
@@ -212,16 +212,16 @@ static uint32_t read_delimited(const char *line, uint32_t position,
  *           past it; or the address was malformed and the result is
  *           PARSE_FAILED.
  */
-static uint32_t parse_address(const char *line, uint32_t position,
-                              Command *command)
+static size_t parse_address(const char *line, size_t position,
+                            Command *command)
 {
-    uint32_t at;
-    uint32_t first;
-    uint32_t second;
-    uint32_t next;
-    uint32_t number_slot;
-    uint32_t length_slot;
-    uint32_t captured;
+    size_t   at;
+    size_t   first;
+    size_t   second;
+    size_t   next;
+    size_t   number_slot;
+    size_t   length_slot;
+    size_t   captured;
     char     value;
     char     following;
     int      ok;
@@ -369,13 +369,13 @@ static int resolve(const Editor *editor, Command *command,
                    Decomposition *decomposition)
 {
     AddressKind kind;
-    uint32_t    last;
-    uint32_t    newlines;
-    uint32_t    total;
-    uint32_t    begin;
-    uint32_t    line_total;
-    uint32_t    current;
-    uint32_t    begin_slot;
+    size_t      last;
+    size_t      newlines;
+    size_t      total;
+    size_t      begin;
+    size_t      line_total;
+    size_t      current;
+    size_t      begin_slot;
     int         ok;
 
     kind = command->address.kind;
@@ -417,15 +417,15 @@ static void print_foci(const Editor *editor,
     unsigned char window[OUTPUT_WINDOW];
     char          label[32];
     uint32_t      count;
-    uint32_t      index;
-    uint32_t      start;
-    uint32_t      end;
-    uint32_t      position;
-    uint32_t      span;
+    size_t        index;
+    size_t        start;
+    size_t        end;
+    size_t        position;
+    size_t        span;
     uint32_t      cursor;
     uint32_t      run;
-    uint32_t      line;
-    uint32_t      line_slot;
+    size_t        line;
+    size_t        line_slot;
     unsigned char value;
     FILE         *stream;
     int           ok;
@@ -502,12 +502,12 @@ static void print_extents(const Editor *editor,
                           const Decomposition *decomposition)
 {
     char     label[128];
-    uint32_t count;
-    uint32_t index;
-    uint32_t start;
-    uint32_t end;
-    uint32_t line;
-    uint32_t line_slot;
+    size_t   count;
+    size_t   index;
+    size_t   start;
+    size_t   end;
+    size_t   line;
+    size_t   line_slot;
     FILE    *stream;
     int      ok;
 
@@ -544,15 +544,15 @@ static void print_extents(const Editor *editor,
  */
 static int compose_matches(const Editor *editor, const Decomposition *outer,
                            const unsigned char *pattern,
-                           uint32_t pattern_length, Decomposition *inner)
+                           size_t pattern_length, Decomposition *inner)
 {
-    uint32_t count;
-    uint32_t index;
-    uint32_t start;
-    uint32_t end;
-    uint32_t position;
-    uint32_t at;
-    uint32_t at_slot;
+    size_t   count;
+    size_t   index;
+    size_t   start;
+    size_t   end;
+    size_t   position;
+    size_t   at;
+    size_t   at_slot;
     uint32_t written;
     int      ok;
 
@@ -601,12 +601,12 @@ static int compose_matches(const Editor *editor, const Decomposition *outer,
 static void adopt(Editor *editor, const Rope *replacement)
 {
     uint32_t serial;
-    uint32_t total;
-    uint32_t newlines;
-    uint32_t lines;
-    uint32_t begin;
-    uint32_t current;
-    uint32_t begin_slot;
+    size_t   total;
+    size_t   newlines;
+    size_t   lines;
+    size_t   begin;
+    size_t   current;
+    size_t   begin_slot;
     int      ok;
 
     memcpy(&editor->text, replacement, sizeof(Rope));
@@ -656,9 +656,9 @@ static int write_to_file(Editor *editor, const char *path)
 {
     unsigned char window[OUTPUT_WINDOW];
     FILE         *file;
-    uint32_t      total;
-    uint32_t      position;
-    uint32_t      span;
+    size_t        total;
+    size_t        position;
+    size_t        span;
     size_t        written;
     int           ok;
 
@@ -747,7 +747,7 @@ int editor_load(Editor *editor, const char *path)
  */
 int editor_initialize(Editor *editor)
 {
-    uint32_t index;
+    size_t   index;
     int      ok;
 
     ok = pool_initialize(&editor->pool);
@@ -790,7 +790,7 @@ int editor_initialize(Editor *editor)
 void editor_release(Editor *editor)
 {
     Structure     *loaded;
-    uint32_t       index;
+    size_t         index;
     unsigned char *buffer;
     int            descriptor;
     JobKind        kind;
@@ -824,16 +824,16 @@ int editor_execute(Editor *editor, const char *line)
     Decomposition matches;
     Rope          edited;
     char          path[NAME_CAPACITY];
-    uint32_t      position;
-    uint32_t      replacement_length;
-    uint32_t      length_slot;
-    uint32_t      pattern_length;
+    size_t        position;
+    size_t        replacement_length;
+    size_t        length_slot;
+    size_t        pattern_length;
     uint32_t      count;
-    uint32_t      index;
-    uint32_t      span_start;
-    uint32_t      span_end;
-    uint32_t      next;
-    uint32_t      previous;
+    size_t        index;
+    size_t        span_start;
+    size_t        span_end;
+    size_t        next;
+    size_t        previous;
     char          verb;
     char          value;
     int           ok;
@@ -1158,9 +1158,9 @@ void editor_attach_loop(Editor *editor, IoLoop *loop)
  * ensures:  editor(editor); the result is the index of an idle job slot, or
  *           JOB_CAPACITY when every slot is busy. No memory is written.
  */
-static uint32_t idle_slot(const Editor *editor)
+static size_t idle_slot(const Editor *editor)
 {
-    uint32_t index;
+    size_t   index;
     JobKind  kind;
 
     index = 0;
@@ -1187,7 +1187,7 @@ static int start_job(Editor *editor, JobKind kind, const char *path)
     int64_t        size;
     int64_t        length;
     int            descriptor;
-    uint32_t       slot;
+    size_t         slot;
     uint32_t       identifier;
     uint32_t       serial;
     uint64_t       token;
@@ -1287,9 +1287,9 @@ int editor_complete(Editor *editor, uint64_t token, int32_t result)
     uint32_t launched;
     uint32_t now;
     uint32_t moved;
-    uint32_t lines;
-    uint32_t index;
-    uint32_t length;
+    size_t   lines;
+    size_t   index;
+    size_t   length;
     unsigned char *buffer;
     unsigned char  value;
     JobKind  kind;
@@ -1425,8 +1425,8 @@ void editor_report_jobs(const Editor *editor)
  */
 static void save_current_buffer(Editor *editor)
 {
-    uint32_t index;
-    uint32_t line_number;
+    size_t   index;
+    size_t   line_number;
     uint32_t serial;
     int      modified;
 
@@ -1450,9 +1450,9 @@ static void save_current_buffer(Editor *editor)
  * ensures:  editor(editor) whose live fields are that slot's, and `current`
  *           is index. The previous buffer must already have been saved.
  */
-static void load_buffer(Editor *editor, uint32_t index)
+static void load_buffer(Editor *editor, size_t index)
 {
-    uint32_t line_number;
+    size_t   line_number;
     uint32_t serial;
     int      modified;
     int      used;
@@ -1485,9 +1485,9 @@ static void load_buffer(Editor *editor, uint32_t index)
 /* requires: as command.h.
  * ensures:  as command.h.
  */
-int editor_select_buffer(Editor *editor, uint32_t index)
+int editor_select_buffer(Editor *editor, size_t index)
 {
-    uint32_t now;
+    size_t   now;
 
     if (index >= BUFFER_CAPACITY) {
         return 0;
@@ -1508,10 +1508,10 @@ void editor_report_buffers(Editor *editor)
 {
     char     label[NAME_CAPACITY + 96];
     FILE    *stream;
-    uint32_t index;
-    uint32_t now;
-    uint32_t length;
-    uint32_t lines;
+    size_t   index;
+    size_t   now;
+    size_t   length;
+    size_t   lines;
     int      used;
     int      modified;
     char     mark;
@@ -1544,9 +1544,9 @@ void editor_report_buffers(Editor *editor)
 /* requires: as command.h.
  * ensures:  as command.h.
  */
-uint32_t editor_free_buffer(const Editor *editor)
+size_t editor_free_buffer(const Editor *editor)
 {
-    uint32_t index;
+    size_t   index;
     int      used;
 
     index = 0;

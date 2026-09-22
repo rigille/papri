@@ -41,8 +41,8 @@ static uint32_t remember_scrap(Rope *scrap, uint32_t count,
  * ensures:  *result has one more span appended and the outcome is 1; or it
  *           was already full and the outcome is 0.
  */
-static int decomposition_append(Decomposition *result, uint32_t start,
-                                uint32_t end)
+static int decomposition_append(Decomposition *result, size_t start,
+                                size_t end)
 {
     uint32_t count;
 
@@ -63,16 +63,16 @@ static int decomposition_append(Decomposition *result, uint32_t start,
  *           deleting a line removes its separator too — and the result is 1;
  *           otherwise the result is 0.
  */
-static int line_bounds(const Rope *rope, uint32_t line, uint32_t *start,
-                       uint32_t *end)
+static int line_bounds(const Rope *rope, size_t line, size_t *start,
+                       size_t *end)
 {
-    uint32_t total;
-    uint32_t newlines;
-    uint32_t line_count;
-    uint32_t begin;
-    uint32_t finish;
-    uint32_t begin_slot;
-    uint32_t finish_slot;
+    size_t   total;
+    size_t   newlines;
+    size_t   line_count;
+    size_t   begin;
+    size_t   finish;
+    size_t   begin_slot;
+    size_t   finish_slot;
     int      ok;
 
     total = rope->byte_count;
@@ -122,12 +122,12 @@ static int line_bounds(const Rope *rope, uint32_t line, uint32_t *start,
  *           counting a trailing fragment with no newline as a line. No
  *           memory is written.
  */
-static uint32_t line_count_of(const Rope *rope)
+static size_t line_count_of(const Rope *rope)
 {
-    uint32_t total;
-    uint32_t newlines;
-    uint32_t begin;
-    uint32_t begin_slot;
+    size_t   total;
+    size_t   newlines;
+    size_t   begin;
+    size_t   begin_slot;
     int      ok;
 
     total = rope->byte_count;
@@ -148,17 +148,17 @@ static uint32_t line_count_of(const Rope *rope)
 /* requires: as address.h.
  * ensures:  as address.h.
  */
-int address_find_literal(const Rope *rope, uint32_t from,
-                         const unsigned char *pattern, uint32_t pattern_length,
-                         uint32_t *found)
+int address_find_literal(const Rope *rope, size_t from,
+                         const unsigned char *pattern, size_t pattern_length,
+                         size_t *found)
 {
     unsigned char window[SEARCH_WINDOW];
-    uint32_t      total;
-    uint32_t      position;
-    uint32_t      span;
-    uint32_t      limit;
+    size_t        total;
+    size_t        position;
+    size_t        span;
+    size_t        limit;
     uint32_t      index;
-    uint32_t      compared;
+    size_t        compared;
     unsigned char left;
     unsigned char right;
     int           ok;
@@ -224,11 +224,11 @@ static int resolve_matches(const Rope *rope, const Address *address,
                            Decomposition *result)
 {
     const unsigned char *pattern;
-    uint32_t             pattern_length;
-    uint32_t             position;
-    uint32_t             total;
-    uint32_t             at;
-    uint32_t             at_slot;
+    size_t               pattern_length;
+    size_t               position;
+    size_t               total;
+    size_t               at;
+    size_t               at_slot;
     int                  ok;
 
     pattern = address->pattern;
@@ -265,18 +265,18 @@ static int resolve_lines_matching(const Rope *rope, const Address *address,
                                   Decomposition *result)
 {
     const unsigned char *pattern;
-    uint32_t             pattern_length;
-    uint32_t             position;
-    uint32_t             total;
-    uint32_t             at;
-    uint32_t             line;
-    uint32_t             start;
-    uint32_t             end;
-    uint32_t             previous_end;
-    uint32_t             at_slot;
-    uint32_t             line_slot;
-    uint32_t             start_slot;
-    uint32_t             end_slot;
+    size_t               pattern_length;
+    size_t               position;
+    size_t               total;
+    size_t               at;
+    size_t               line;
+    size_t               start;
+    size_t               end;
+    size_t               previous_end;
+    size_t               at_slot;
+    size_t               line_slot;
+    size_t               start_slot;
+    size_t               end_slot;
     int                  ok;
 
     pattern = address->pattern;
@@ -328,20 +328,20 @@ static int resolve_lines_matching(const Rope *rope, const Address *address,
  * ensures:  as address.h.
  */
 int address_resolve(const Rope *rope, const Address *address,
-                    uint32_t current_line, Decomposition *result)
+                    size_t current_line, Decomposition *result)
 {
     AddressKind kind;
-    uint32_t    total;
-    uint32_t    first;
-    uint32_t    last;
-    uint32_t    start;
-    uint32_t    end;
-    uint32_t    lines;
-    uint32_t    line;
-    uint32_t    span_start;
-    uint32_t    span_end;
-    uint32_t    start_slot;
-    uint32_t    end_slot;
+    size_t      total;
+    size_t      first;
+    size_t      last;
+    size_t      start;
+    size_t      end;
+    size_t      lines;
+    size_t      line;
+    size_t      span_start;
+    size_t      span_end;
+    size_t      start_slot;
+    size_t      end_slot;
     int         ok;
 
     result->count = 0;
@@ -458,7 +458,7 @@ int address_resolve(const Rope *rope, const Address *address,
 int address_replace_all(Pool *pool, const Rope *rope,
                         const Decomposition *decomposition,
                         const unsigned char *replacement,
-                        uint32_t replacement_length,
+                        size_t replacement_length,
                         Rope *result)
 {
     Rope     scrap[SCRAP_CAPACITY];
@@ -470,10 +470,10 @@ int address_replace_all(Pool *pool, const Rope *rope,
     uint32_t scrap_count;
     uint32_t count;
     uint32_t index;
-    uint32_t position;
-    uint32_t total;
-    uint32_t start;
-    uint32_t end;
+    size_t   position;
+    size_t   total;
+    size_t   start;
+    size_t   end;
     int      ok;
 
     count = decomposition->count;
@@ -540,7 +540,7 @@ int address_replace_all(Pool *pool, const Rope *rope,
 int address_insert_all(Pool *pool, const Rope *rope,
                        const Decomposition *decomposition, int before,
                        const unsigned char *insertion,
-                       uint32_t insertion_length,
+                       size_t insertion_length,
                        Rope *result)
 {
     Rope     scrap[SCRAP_CAPACITY];
@@ -552,11 +552,11 @@ int address_insert_all(Pool *pool, const Rope *rope,
     uint32_t scrap_count;
     uint32_t count;
     uint32_t index;
-    uint32_t position;
-    uint32_t total;
-    uint32_t start;
-    uint32_t end;
-    uint32_t at;
+    size_t   position;
+    size_t   total;
+    size_t   start;
+    size_t   end;
+    size_t   at;
     int      ok;
 
     count = decomposition->count;

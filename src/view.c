@@ -13,7 +13,7 @@
 /* requires: holds a read share of `length` bytes at `bytes`.
  * ensures:  the read share is returned; they are written to standard output.
  */
-static void put_bytes(const unsigned char *bytes, uint32_t length)
+static void put_bytes(const unsigned char *bytes, size_t length)
 {
     FILE *stream;
 
@@ -35,11 +35,11 @@ static void put_text(const char *text)
 /* requires: as view.h.
  * ensures:  as view.h.
  */
-void view_write_text(const Rope *rope, uint32_t start, uint32_t end)
+void view_write_text(const Rope *rope, size_t start, size_t end)
 {
     unsigned char window[VIEW_WINDOW];
-    uint32_t      position;
-    uint32_t      span;
+    size_t        position;
+    size_t        span;
     int           ok;
 
     position = start;
@@ -60,14 +60,14 @@ void view_write_text(const Rope *rope, uint32_t start, uint32_t end)
 /* requires: as view.h.
  * ensures:  as view.h.
  */
-void view_write_hex(const Rope *rope, uint32_t start, uint32_t end)
+void view_write_hex(const Rope *rope, size_t start, size_t end)
 {
     unsigned char row[HEX_COLUMNS];
     char          line[128];
-    uint32_t      position;
-    uint32_t      span;
+    size_t        position;
+    size_t        span;
     uint32_t      index;
-    uint32_t      written;
+    size_t        written;
     unsigned char value;
     int           ok;
 
@@ -131,17 +131,17 @@ void view_write_hex(const Rope *rope, uint32_t start, uint32_t end)
 /* requires: as view.h.
  * ensures:  as view.h.
  */
-void view_write_codepoints(const Rope *rope, uint32_t start, uint32_t end)
+void view_write_codepoints(const Rope *rope, size_t start, size_t end)
 {
     unsigned char window[VIEW_WINDOW];
     char          line[128];
-    uint32_t      position;
-    uint32_t      span;
+    size_t        position;
+    size_t        span;
     uint32_t      index;
     uint32_t      state;
     uint32_t      codepoint;
     uint32_t      decoded;
-    uint32_t      began;
+    size_t        began;
     unsigned char value;
     int           ok;
 

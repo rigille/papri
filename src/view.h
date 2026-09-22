@@ -29,14 +29,14 @@
  * ensures:  rope(rope, bytes, share); those bytes are written verbatim to
  *           standard output.
  */
-void view_write_text(const Rope *rope, uint32_t start, uint32_t end);
+void view_write_text(const Rope *rope, size_t start, size_t end);
 
 /* requires: rope(rope, bytes, share); start <= end <= |bytes|.
  * ensures:  rope(rope, bytes, share); those bytes are written to standard
  *           output as a hex dump — sixteen per line, each line prefixed with
  *           its absolute byte offset and followed by the printable ASCII.
  */
-void view_write_hex(const Rope *rope, uint32_t start, uint32_t end);
+void view_write_hex(const Rope *rope, size_t start, size_t end);
 
 /* requires: rope(rope, bytes, share); start <= end <= |bytes|.
  * ensures:  rope(rope, bytes, share); those bytes are decoded as UTF-8 and
@@ -45,6 +45,6 @@ void view_write_hex(const Rope *rope, uint32_t start, uint32_t end);
  *           cannot continue a code point is reported as invalid and
  *           decoding resumes at the byte after it.
  */
-void view_write_codepoints(const Rope *rope, uint32_t start, uint32_t end);
+void view_write_codepoints(const Rope *rope, size_t start, size_t end);
 
 #endif /* PAPRI_VIEW_H */

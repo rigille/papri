@@ -47,8 +47,8 @@ typedef struct RopeNode RopeNode;
 typedef struct Rope {
     void    *root;          /* RopeNode* above height 0, leaf bytes at 0 */
     uint32_t height;        /* 0 when the root is a single leaf or empty */
-    uint32_t byte_count;
-    uint32_t newline_count;
+    size_t   byte_count;
+    size_t   newline_count;
 } Rope;
 
 /* requires: *rope is allocated and writable.
@@ -62,27 +62,27 @@ void rope_initialize_empty(Rope *rope);
  *           where contents is a copy of those bytes, and the result is 1; or
  *           allocation failed, *rope is empty, and the result is 0.
  */
-int rope_from_bytes(Pool *pool, const unsigned char *bytes, uint32_t length,
+int rope_from_bytes(Pool *pool, const unsigned char *bytes, size_t length,
                     Rope *rope);
 
 /* requires: rope(rope, bytes, share).
  * ensures:  rope(rope, bytes, share); the result is the length of bytes. No
  *           memory is written.
  */
-uint32_t rope_byte_count(const Rope *rope);
+size_t rope_byte_count(const Rope *rope);
 
 /* requires: rope(rope, bytes, share).
  * ensures:  rope(rope, bytes, share); the result is the number of newlines in
  *           bytes. No memory is written.
  */
-uint32_t rope_newline_count(const Rope *rope);
+size_t rope_newline_count(const Rope *rope);
 
 /* requires: rope(rope, bytes, share); *value is writable.
  * ensures:  rope(rope, bytes, share). When offset is within bytes, *value is
  *           the byte there and the result is 1; otherwise *value is unchanged
  *           and the result is 0.
  */
-int rope_byte_at(const Rope *rope, uint32_t offset, unsigned char *value);
+int rope_byte_at(const Rope *rope, size_t offset, unsigned char *value);
 
 /* requires: rope(rope, bytes, share); holds a write share of `length` bytes
  *           at `destination`.
@@ -90,7 +90,7 @@ int rope_byte_at(const Rope *rope, uint32_t offset, unsigned char *value);
  *           `destination` holds that slice of bytes and the result is 1;
  *           otherwise `destination` is unchanged and the result is 0.
  */
-int rope_copy_range(const Rope *rope, uint32_t offset, uint32_t length,
+int rope_copy_range(const Rope *rope, size_t offset, size_t length,
                     unsigned char *destination);
 
 /* requires: node_pool(pool, live, residual); rope(rope, bytes, share); *left
@@ -101,7 +101,7 @@ int rope_copy_range(const Rope *rope, uint32_t offset, uint32_t length,
  *           or allocation failed and the result is 0. The results hold shares
  *           of nodes `rope` also holds; nothing is copied that can be shared.
  */
-int rope_split(Pool *pool, const Rope *rope, uint32_t offset,
+int rope_split(Pool *pool, const Rope *rope, size_t offset,
                Rope *left, Rope *right);
 
 /* requires: node_pool(pool, live, residual); rope(rope, bytes, share);
@@ -111,7 +111,7 @@ int rope_split(Pool *pool, const Rope *rope, uint32_t offset,
  *           result is 1; or the range was out of order or allocation failed
  *           and the result is 0.
  */
-int rope_slice(Pool *pool, const Rope *rope, uint32_t start, uint32_t end,
+int rope_slice(Pool *pool, const Rope *rope, size_t start, size_t end,
                Rope *slice);
 
 /* requires: node_pool(pool, live, residual); rope(left, a, share_a) and
@@ -137,9 +137,9 @@ int rope_concat(Pool *pool, const Rope *left, const Rope *right, Rope *result);
  *           failed, and the result is 0.
  */
 int rope_replace_span(Pool *pool, const Rope *rope,
-                      uint32_t start, uint32_t end,
+                      size_t start, size_t end,
                       const unsigned char *replacement,
-                      uint32_t replacement_length,
+                      size_t replacement_length,
                       Rope *result);
 
 /* requires: rope(rope, bytes, share); *offset is writable.
@@ -148,7 +148,7 @@ int rope_replace_span(Pool *pool, const Rope *rope,
  *           line that begins within bytes, *offset is where it begins and the
  *           result is 1; otherwise *offset is unchanged and the result is 0.
  */
-int rope_line_start(const Rope *rope, uint32_t line_index, uint32_t *offset);
+int rope_line_start(const Rope *rope, size_t line_index, size_t *offset);
 
 /* requires: rope(rope, bytes, share); *line_index is writable.
  * ensures:  rope(rope, bytes, share). When offset is at most |bytes|,
@@ -156,8 +156,8 @@ int rope_line_start(const Rope *rope, uint32_t line_index, uint32_t *offset);
  *           line the offset falls on — and the result is 1; otherwise
  *           *line_index is unchanged and the result is 0.
  */
-int rope_line_of_offset(const Rope *rope, uint32_t offset,
-                        uint32_t *line_index);
+int rope_line_of_offset(const Rope *rope, size_t offset,
+                        size_t *line_index);
 
 /* Free exactly the nodes the retiring version holds and the survivor does
  * not — the runtime half of the reclamation story.

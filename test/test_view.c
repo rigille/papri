@@ -152,8 +152,8 @@ static void test_codepoint_across_a_leaf_boundary(void)
 {
     unsigned char source[200];
     Rope          rope;
-    uint32_t      index;
-    uint32_t      length;
+    size_t        index;
+    size_t        length;
     int           before;
     int           ok;
 

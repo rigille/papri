@@ -15,7 +15,7 @@
 static int      failures;
 static Pool     pool;
 static uint8_t  model[MODEL_CAPACITY];
-static uint32_t model_length;
+static size_t   model_length;
 static uint8_t  scratch[MODEL_CAPACITY];
 static uint64_t random_state;
 
@@ -69,23 +69,23 @@ static uint64_t next_random(void)
 /* requires: bound > 0.
  * ensures:  the result is less than bound; `random_state` advances.
  */
-static uint32_t random_below(uint32_t bound)
+static size_t random_below(size_t bound)
 {
     uint64_t value;
-    uint32_t reduced;
+    size_t   reduced;
 
     value = next_random();
-    reduced = (uint32_t)(value % bound);
+    reduced = (size_t)(value % bound);
     return reduced;
 }
 
 /* requires: holds a read share of `length` bytes at `bytes`.
  * ensures:  the read share is returned; the result is the number of newlines.
  */
-static uint32_t model_newlines(const uint8_t *bytes, uint32_t length)
+static size_t model_newlines(const uint8_t *bytes, size_t length)
 {
-    uint32_t index;
-    uint32_t total;
+    size_t   index;
+    size_t   total;
     uint8_t  value;
 
     total = 0;
@@ -106,16 +106,16 @@ static uint32_t model_newlines(const uint8_t *bytes, uint32_t length)
  */
 static void expect_matches_model(const Rope *rope, const char *where)
 {
-    uint32_t length;
-    uint32_t newlines;
-    uint32_t expected_newlines;
+    size_t   length;
+    size_t   newlines;
+    size_t   expected_newlines;
     int      ok;
     int      same;
 
     length = rope_byte_count(rope);
     if (length != model_length) {
         failures = failures + 1;
-        printf("  FAIL  %s: length %u, model %u\n", where, length,
+        printf("  FAIL  %s: length %zu, model %zu\n", where, length,
                model_length);
         return;
     }
@@ -124,7 +124,7 @@ static void expect_matches_model(const Rope *rope, const char *where)
     expected_newlines = model_newlines(model, model_length);
     if (newlines != expected_newlines) {
         failures = failures + 1;
-        printf("  FAIL  %s: newlines %u, model %u\n", where, newlines,
+        printf("  FAIL  %s: newlines %zu, model %zu\n", where, newlines,
                expected_newlines);
         return;
     }
@@ -160,12 +160,11 @@ static void expect_matches_model(const Rope *rope, const char *where)
  *           MODEL_CAPACITY.
  * ensures:  the model holds its bytes with [start, end) replaced.
  */
-static void model_replace(uint32_t start, uint32_t end,
-                          const uint8_t *replacement,
-                          uint32_t replacement_length)
+static void model_replace(size_t start, size_t end,                          const uint8_t *replacement,
+                          size_t replacement_length)
 {
-    uint32_t tail_length;
-    uint32_t new_length;
+    size_t   tail_length;
+    size_t   new_length;
 
     tail_length = model_length - end;
     new_length = start + replacement_length + tail_length;
@@ -184,7 +183,7 @@ static void model_replace(uint32_t start, uint32_t end,
  */
 static void test_pool_alignment(void)
 {
-    uint32_t  index;
+    size_t    index;
     void     *block;
     uintptr_t address;
     uintptr_t remainder;
@@ -212,10 +211,10 @@ static void test_from_bytes_round_trip(void)
 {
     static uint8_t source[4096];
     Rope           rope;
-    uint32_t       index;
+    size_t         index;
     uint32_t       lengths[8];
     uint32_t       which;
-    uint32_t       length;
+    size_t         length;
     int            ok;
     int            before;
 
@@ -265,9 +264,9 @@ static void test_split_then_concat_is_identity(void)
     Rope           left;
     Rope           right;
     Rope           rejoined;
-    uint32_t       index;
-    uint32_t       offset;
-    uint32_t       length;
+    size_t         index;
+    size_t         offset;
+    size_t         length;
     int            ok;
     int            before;
 
@@ -320,9 +319,9 @@ static void test_line_addressing(void)
 {
     static const uint8_t source[] = "alpha\nbeta\n\ngamma\ndelta";
     Rope                 rope;
-    uint32_t             length;
-    uint32_t             offset;
-    uint32_t             line;
+    size_t               length;
+    size_t               offset;
+    size_t               line;
     int                  ok;
     int                  before;
 
@@ -371,13 +370,13 @@ static void test_random_edits_track_the_model(void)
     static uint8_t replacement[300];
     Rope           rope;
     Rope           edited;
-    uint32_t       step;
-    uint32_t       index;
-    uint32_t       start;
-    uint32_t       end;
-    uint32_t       span;
-    uint32_t       length;
-    uint32_t       room;
+    size_t         step;
+    size_t         index;
+    size_t         start;
+    size_t         end;
+    size_t         span;
+    size_t         length;
+    size_t         room;
     int            ok;
     int            before;
 
@@ -419,7 +418,7 @@ static void test_random_edits_track_the_model(void)
                                &edited);
         if (ok == 0) {
             failures = failures + 1;
-            printf("  FAIL  replace_span refused at step %u\n", step);
+            printf("  FAIL  replace_span refused at step %zu\n", step);
             report("random edits track the model", before);
             return;
         }
@@ -430,7 +429,7 @@ static void test_random_edits_track_the_model(void)
         memcpy(&rope, &edited, sizeof(Rope));
 
         if (failures != before) {
-            printf("  ...   first divergence at step %u\n", step);
+            printf("  ...   first divergence at step %zu\n", step);
             report("random edits track the model", before);
             return;
         }
@@ -445,20 +444,22 @@ static void test_random_edits_track_the_model(void)
  */
 static void test_edits_share_structure(void)
 {
-    static uint8_t source[32768];
+    static uint8_t source[262144];
     Rope           rope;
+    Rope           larger;
     Rope           edited;
-    uint32_t       index;
+    size_t         index;
     size_t         before_bytes;
     size_t         after_bytes;
     size_t         spent;
+    size_t         spent_larger;
     int            ok;
     int            before;
 
     before = failures;
 
     index = 0;
-    while (index < 32768) {
+    while (index < 262144) {
         source[index] = (uint8_t)(index % 89);
         index = index + 1;
     }
@@ -470,16 +471,29 @@ static void test_edits_share_structure(void)
     ok = rope_replace_span(&pool, &rope, 16384, 16385, source, 1, &edited);
     expect(ok == 1, "a one-byte edit succeeds");
     after_bytes = pool_handed_out(&pool);
-
     spent = after_bytes - before_bytes;
-    /* A path copy touches one node per level plus a couple of leaves, not
-     * the 32 KiB of text. Ten times the leaf size is a generous ceiling that
-     * still fails loudly if the tree ever starts copying wholesale. */
-    expect(spent < 32768, "a one-byte edit does not copy the whole buffer");
-    expect(spent < 8192, "a one-byte edit copies only a spine");
 
-    printf("  note  a 1-byte edit to a 32 KiB rope allocated %zu bytes\n",
-           spent);
+    expect(spent < 32768, "a one-byte edit does not copy the whole buffer");
+
+    /* The real property is that the cost is logarithmic, so state it that
+     * way rather than against a byte count that goes stale whenever a node
+     * changes size. An eightfold larger buffer is one level deeper, so the
+     * same edit may cost a little more — never eight times more. */
+    ok = rope_from_bytes(&pool, source, 262144, &larger);
+    expect(ok == 1, "the eightfold larger rope is built");
+
+    before_bytes = pool_handed_out(&pool);
+    ok = rope_replace_span(&pool, &larger, 131072, 131073, source, 1,
+                           &edited);
+    expect(ok == 1, "a one-byte edit to the larger rope succeeds");
+    after_bytes = pool_handed_out(&pool);
+    spent_larger = after_bytes - before_bytes;
+
+    expect(spent_larger < spent * 2,
+           "eight times the text does not cost twice the edit");
+
+    printf("  note  a 1-byte edit cost %zu bytes at 32 KiB, %zu at 256 KiB\n",
+           spent, spent_larger);
 
     report("edits share structure with their source", before);
 }
