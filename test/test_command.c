@@ -1,4 +1,5 @@
 #include "command.h"
+#include "line_index.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -6,7 +7,7 @@
 /* The command layer, driven the way a person drives it: a sequence of
  * command lines, then a check on what the buffer became. */
 
-#define SCRATCH_CAPACITY 65536u
+#define SCRATCH_CAPACITY 262144u
 
 static int     failures;
 static Editor  editor;
@@ -112,6 +113,14 @@ static void load_text(const char *text)
         return;
     }
     memcpy(&editor.text, &built, sizeof(Rope));
+    /* The index is part of the buffer now, so a helper that installs one
+     * has to install the other. */
+    ok = line_index_build(&editor.pool, &editor.text, &editor.index);
+    if (ok == 0) {
+        failures = failures + 1;
+        printf("  FAIL  could not build the starting index\n");
+        return;
+    }
     editor.current_line = 1;
     editor.modified = 0;
 }
@@ -360,6 +369,81 @@ static void test_buffers_are_independent(void)
     report("buffers hold their own text and do not leak", before);
 }
 
+/* The bug this exists for: an edit through the editor corrupted buffers
+ * over about ten kilobytes, and every existing test missed it. The rope's
+ * model test drives rope_replace_span, not the editor's path through
+ * address_replace_all; the command tests drive that path but only on
+ * buffers of a few dozen bytes. The hole was the intersection.
+ *
+ * requires: node_pool is live.
+ * ensures:  `failures` counts the bytes an edit to a large buffer got wrong.
+ */
+static void test_large_buffer_edits_keep_their_bytes(void)
+{
+    static char source[120000];
+    static char expected[120000];
+    size_t      length;
+    size_t      index;
+    size_t      count;
+    int         before;
+    int         ok;
+    int         same;
+
+    before = failures;
+
+    length = 0;
+    index = 1;
+    while (length < 100000) {
+        length = length + (size_t)snprintf(source + length,
+                                           sizeof(source) - length,
+                                           "%zu\n", index);
+        index = index + 1;
+    }
+    memcpy(expected, source, length);
+
+    load_text(source);
+
+    ok = run("%s/4242/XXXX/");
+    expect(ok == 1, "a substitution in a large buffer succeeds");
+
+    count = rope_byte_count(&editor.text);
+    expect(count == length, "the buffer keeps its length");
+
+    ok = rope_copy_range(&editor.text, 0, count,
+                         (unsigned char *)scratch);
+    expect(ok == 1, "the whole buffer can be read back");
+
+    /* The same edit in the model. `%s` replaces EVERY occurrence, not
+     * the first, and in a buffer of ascending numbers "4242" occurs
+     * inside 14242 and 42420 as well as on its own line. */
+    index = 0;
+    while (index + 4 <= length) {
+        same = memcmp(expected + index, "4242", 4);
+        if (same == 0) {
+            memcpy(expected + index, "XXXX", 4);
+            index = index + 4;
+        } else {
+            index = index + 1;
+        }
+    }
+    same = memcmp(scratch, expected, length);
+    if (same != 0) {
+        index = 0;
+        while (index < length) {
+            if (scratch[index] != expected[index]) {
+                break;
+            }
+            index = index + 1;
+        }
+        failures = failures + 1;
+        printf("  FAIL  large buffer differs from byte %zu\n", index);
+        printf("  ...   got  %.16s\n", scratch + index);
+        printf("  ...   want %.16s\n", expected + index);
+    }
+
+    report("edits to a large buffer keep every byte", before);
+}
+
 /* requires: standard output is writable.
  * ensures:  every test above has run and reported; the result is 0 when
  *           `failures` is 0 and 1 otherwise.
@@ -382,6 +466,7 @@ int main(void)
     test_pattern_addresses();
     test_old_versions_survive_edits();
     test_buffers_are_independent();
+    test_large_buffer_edits_keep_their_bytes();
 
     editor_release(&editor);
 

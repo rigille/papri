@@ -79,27 +79,6 @@ static size_t random_below(size_t bound)
     return reduced;
 }
 
-/* requires: holds a read share of `length` bytes at `bytes`.
- * ensures:  the read share is returned; the result is the number of newlines.
- */
-static size_t model_newlines(const uint8_t *bytes, size_t length)
-{
-    size_t   index;
-    size_t   total;
-    uint8_t  value;
-
-    total = 0;
-    index = 0;
-    while (index < length) {
-        value = bytes[index];
-        if (value == 0x0A) {
-            total = total + 1;
-        }
-        index = index + 1;
-    }
-    return total;
-}
-
 /* requires: rope(rope, bytes, share); the model holds `model_length` bytes.
  * ensures:  rope(rope, bytes, share); `failures` counts every way the rope
  *           disagrees with the model or breaks its own invariants.
@@ -107,8 +86,6 @@ static size_t model_newlines(const uint8_t *bytes, size_t length)
 static void expect_matches_model(const Rope *rope, const char *where)
 {
     size_t   length;
-    size_t   newlines;
-    size_t   expected_newlines;
     int      ok;
     int      same;
 
@@ -120,14 +97,6 @@ static void expect_matches_model(const Rope *rope, const char *where)
         return;
     }
 
-    newlines = rope_newline_count(rope);
-    expected_newlines = model_newlines(model, model_length);
-    if (newlines != expected_newlines) {
-        failures = failures + 1;
-        printf("  FAIL  %s: newlines %zu, model %zu\n", where, newlines,
-               expected_newlines);
-        return;
-    }
 
     ok = rope_check_invariants(rope);
     if (ok == 0) {
@@ -311,55 +280,6 @@ static void test_split_then_concat_is_identity(void)
     report("split then concat is the identity", before);
 }
 
-/* requires: node_pool(pool, live, residual).
- * ensures:  `failures` counts the line addressing properties that did not
- *           hold.
- */
-static void test_line_addressing(void)
-{
-    static const uint8_t source[] = "alpha\nbeta\n\ngamma\ndelta";
-    Rope                 rope;
-    size_t               length;
-    size_t               offset;
-    size_t               line;
-    int                  ok;
-    int                  before;
-
-    before = failures;
-    length = (uint32_t)(sizeof(source) - 1);
-
-    ok = rope_from_bytes(&pool, source, length, &rope);
-    expect(ok == 1, "the line-addressing rope is built");
-
-    line = rope_newline_count(&rope);
-    expect(line == 4, "four newlines are counted");
-
-    ok = rope_line_start(&rope, 0, &offset);
-    expect(ok == 1 && offset == 0, "line 0 starts at 0");
-    ok = rope_line_start(&rope, 1, &offset);
-    expect(ok == 1 && offset == 6, "line 1 starts after the first newline");
-    ok = rope_line_start(&rope, 2, &offset);
-    expect(ok == 1 && offset == 11, "line 2 starts after the second");
-    ok = rope_line_start(&rope, 3, &offset);
-    expect(ok == 1 && offset == 12, "an empty line still starts somewhere");
-    ok = rope_line_start(&rope, 4, &offset);
-    expect(ok == 1 && offset == 18, "line 4 starts after the fourth newline");
-    ok = rope_line_start(&rope, 5, &offset);
-    expect(ok == 0, "a line past the end is refused");
-
-    ok = rope_line_of_offset(&rope, 0, &line);
-    expect(ok == 1 && line == 0, "offset 0 is on line 0");
-    ok = rope_line_of_offset(&rope, 5, &line);
-    expect(ok == 1 && line == 0, "the newline itself is on its own line");
-    ok = rope_line_of_offset(&rope, 6, &line);
-    expect(ok == 1 && line == 1, "just past a newline is the next line");
-    ok = rope_line_of_offset(&rope, 20, &line);
-    expect(ok == 1 && line == 4, "a late offset is on the last line");
-    ok = rope_line_of_offset(&rope, length + 1, &line);
-    expect(ok == 0, "an offset past the end is refused");
-
-    report("line addressing agrees with the text", before);
-}
 
 /* requires: node_pool(pool, live, residual).
  * ensures:  `failures` counts the ways a long random edit sequence made the
@@ -588,7 +508,6 @@ int main(void)
     test_pool_alignment();
     test_from_bytes_round_trip();
     test_split_then_concat_is_identity();
-    test_line_addressing();
     test_random_edits_track_the_model();
     test_edits_share_structure();
     test_many_concats_stay_balanced();

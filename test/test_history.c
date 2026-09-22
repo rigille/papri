@@ -8,17 +8,20 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Reclamation. The share algebra says WHEN a node may go back — once every
- * share of it has rejoined to the full share — but shares are ghost state
- * and cannot say WHICH nodes those are. The reclamation walk is what finds
- * them, and the obligation connecting the two is that it returns exactly the
- * nodes whose shares have rejoined.
+/* History retirement.
  *
- * The test below is that obligation made executable: after retiring the
- * history down to the versions still held, the pool's live bytes must equal
- * the memory those versions actually occupy. Not less, which would mean a
- * node was freed while still reachable; not more, which would mean a dead
- * node was kept.
+ * Nothing is reclaimed yet. The walk that used to free a retired version's
+ * unshared nodes was removed: its pruning shortcut — stop descending
+ * wherever a node is reached by both sides — is sound for one dead root
+ * against one survivor, because a version is a tree and there is only one
+ * path to any node. For a SET of dead roots it is not: two of them can
+ * reach the same subtree by different paths, the first prunes it without
+ * recording its interior as live, and the second then frees nodes that are
+ * still reachable. That corrupted buffers over about ten kilobytes.
+ *
+ * So papri leaks until the collector lands. What these tests still hold to
+ * account is the part that survives that: pins, and the fact that a
+ * retired version's successor stays readable and sound.
  */
 
 static int      failures;
@@ -84,7 +87,6 @@ static void test_retirement_frees_the_difference(void)
     size_t        occupied;
     size_t        step;
     uint32_t      remaining;
-    uint32_t      leaked;
     int           before;
     int           ok;
 
@@ -111,7 +113,7 @@ static void test_retirement_frees_the_difference(void)
         if (ok == 0) {
             failures = failures + 1;
             printf("  FAIL  edit %u refused\n", step);
-            report("retirement frees exactly the difference", before);
+            report("a retired version leaves its successor sound", before);
             return;
         }
         ok = history_push(&history, &pool, &edited);
@@ -133,8 +135,6 @@ static void test_retirement_frees_the_difference(void)
     remaining = history_count(&history);
     expect(remaining == 1, "the history retires down to one version");
 
-    leaked = history_leaked(&history);
-    expect(leaked == 0, "no retirement had to leak");
 
     ok = history_at(&history, 0, &survivor);
     expect(ok == 1, "the survivor is readable");
@@ -144,18 +144,16 @@ static void test_retirement_frees_the_difference(void)
 
     live_bytes = pool_live(&pool);
     occupied = rope_allocated_bytes(&survivor);
-
-    if (live_bytes != occupied) {
-        failures = failures + 1;
-        printf("  FAIL  pool holds %zu live bytes, the survivor occupies %zu\n",
-               live_bytes, occupied);
-        printf("  ...   %s\n",
-               live_bytes > occupied ? "dead nodes were kept"
-                                     : "a reachable node was freed");
-    }
+    /* Nothing is reclaimed yet, so the pool can only hold more than the
+     * survivor needs — never less, which would mean a reachable node had
+     * been freed. */
+    expect(live_bytes >= occupied,
+           "the pool still holds what the survivor occupies");
+    printf("  note  pool holds %zu live bytes; the survivor occupies %zu\n",
+           live_bytes, occupied);
 
     pool_release(&pool);
-    report("retirement frees exactly the difference", before);
+    report("a retired version leaves its successor sound", before);
 }
 
 /* requires: node_pool(pool, live, residual).
@@ -235,11 +233,14 @@ static void test_a_pin_stalls_the_frontier(void)
     report("a pinned version stalls the retirement frontier", before);
 }
 
-/* requires: node_pool is live.
- * ensures:  `failures` counts the ways the editor's memory grew without
- *           bound over a long editing session.
+/* Nothing is reclaimed, so memory grows with the session. What this records
+ * is how fast — a number to watch, and to compare against once the
+ * collector is wired in.
+ *
+ * requires: node_pool is live.
+ * ensures:  `failures` counts only the ways the accounting went backwards.
  */
-static void test_editor_memory_stays_bounded(void)
+static void test_editor_memory_growth(void)
 {
     char     line[64];
     size_t   after_warmup;
@@ -282,11 +283,11 @@ static void test_editor_memory_stays_bounded(void)
      * legitimately cost more than a few hundred KiB. */
     growth = at_end - after_warmup;
     expect(at_end >= after_warmup, "memory accounting does not go backwards");
-    expect(growth < 4u * 1024u * 1024u,
-           "a long editing session does not grow without bound");
+    printf("  note  400 edits cost %zu bytes, %zu each\n", growth,
+           growth / 400);
 
     editor_release(&editor);
-    report("editor memory stays bounded over a long session", before);
+    report("editor memory growth is recorded", before);
 }
 
 /* requires: standard output is writable.
@@ -299,7 +300,7 @@ int main(void)
 
     test_retirement_frees_the_difference();
     test_a_pin_stalls_the_frontier();
-    test_editor_memory_stays_bounded();
+    test_editor_memory_growth();
 
     if (failures == 0) {
         printf("all tests passed\n");

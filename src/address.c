@@ -7,36 +7,6 @@
  * would defeat the point of having a rope at all. */
 #define SEARCH_WINDOW 4096
 
-/* Every rope an edit builds and then stops using. Splitting and
- * concatenating leaves spines that neither the version we started from nor
- * the one we produced can reach, so version-to-version diffing would never
- * collect them; they are handed to the reclamation walk as dead roots when
- * the edit finishes. */
-#define SCRAP_CAPACITY 256
-
-/* requires: `scrap` holds `count` entries and has room for SCRAP_CAPACITY;
- *           rope(candidate, bytes, share) is a rope the edit has stopped
- *           using.
- * ensures:  `scrap` records it when there was room and the result is the
- *           new count; or it was full and the result is `count`, in which
- *           case that rope is simply never collected.
- */
-static uint32_t remember_scrap(Rope *scrap, uint32_t count,
-                               const Rope *candidate)
-{
-    const void *root;
-
-    root = candidate->root;
-    if (root == NULL) {
-        return count;
-    }
-    if (count >= SCRAP_CAPACITY) {
-        return count;
-    }
-    memcpy(&scrap[count], candidate, sizeof(Rope));
-    return count + 1;
-}
-
 /* requires: *result writable; the span is within the buffer.
  * ensures:  *result has one more span appended and the outcome is 1; or it
  *           was already full and the outcome is 0.
@@ -63,8 +33,8 @@ static int decomposition_append(Decomposition *result, size_t start,
  *           deleting a line removes its separator too — and the result is 1;
  *           otherwise the result is 0.
  */
-static int line_bounds(const Rope *rope, size_t line, size_t *start,
-                       size_t *end)
+static int line_bounds(const Rope *rope, const LineIndex *index,
+                       size_t line, size_t *start, size_t *end)
 {
     size_t   total;
     size_t   newlines;
@@ -76,12 +46,12 @@ static int line_bounds(const Rope *rope, size_t line, size_t *start,
     int      ok;
 
     total = rope->byte_count;
-    newlines = rope->newline_count;
+    newlines = line_index_newline_count(index);
 
     /* A buffer not ending in a newline still has a final line. */
     line_count = newlines;
     if (total > 0) {
-        ok = rope_line_start(rope, newlines, &begin_slot);
+        ok = line_index_line_start(index, rope, newlines, &begin_slot);
         if (ok == 1) {
             begin = begin_slot;
             if (begin < total) {
@@ -99,13 +69,13 @@ static int line_bounds(const Rope *rope, size_t line, size_t *start,
         return 0;
     }
 
-    ok = rope_line_start(rope, line - 1, &begin_slot);
+    ok = line_index_line_start(index, rope, line - 1, &begin_slot);
     if (ok == 0) {
         return 0;
     }
     begin = begin_slot;
 
-    ok = rope_line_start(rope, line, &finish_slot);
+    ok = line_index_line_start(index, rope, line, &finish_slot);
     if (ok == 0) {
         finish = total;
     } else {
@@ -122,7 +92,7 @@ static int line_bounds(const Rope *rope, size_t line, size_t *start,
  *           counting a trailing fragment with no newline as a line. No
  *           memory is written.
  */
-static size_t line_count_of(const Rope *rope)
+static size_t line_count_of(const Rope *rope, const LineIndex *index)
 {
     size_t   total;
     size_t   newlines;
@@ -134,8 +104,8 @@ static size_t line_count_of(const Rope *rope)
     if (total == 0) {
         return 0;
     }
-    newlines = rope->newline_count;
-    ok = rope_line_start(rope, newlines, &begin_slot);
+    newlines = line_index_newline_count(index);
+    ok = line_index_line_start(index, rope, newlines, &begin_slot);
     if (ok == 1) {
         begin = begin_slot;
         if (begin < total) {
@@ -261,7 +231,8 @@ static int resolve_matches(const Rope *rope, const Address *address,
  * ensures:  *result gains one focus per line containing the pattern; the
  *           outcome is 1, or 0 when there were too many to record.
  */
-static int resolve_lines_matching(const Rope *rope, const Address *address,
+static int resolve_lines_matching(const Rope *rope, const LineIndex *index,
+                                  const Address *address,
                                   Decomposition *result)
 {
     const unsigned char *pattern;
@@ -296,13 +267,13 @@ static int resolve_lines_matching(const Rope *rope, const Address *address,
         }
         at = at_slot;
 
-        ok = rope_line_of_offset(rope, at, &line_slot);
+        ok = line_index_line_of_offset(index, rope, at, &line_slot);
         if (ok == 0) {
             return 0;
         }
         line = line_slot;
 
-        ok = line_bounds(rope, line + 1, &start_slot, &end_slot);
+        ok = line_bounds(rope, index, line + 1, &start_slot, &end_slot);
         if (ok == 0) {
             return 0;
         }
@@ -327,8 +298,9 @@ static int resolve_lines_matching(const Rope *rope, const Address *address,
 /* requires: as address.h.
  * ensures:  as address.h.
  */
-int address_resolve(const Rope *rope, const Address *address,
-                    size_t current_line, Decomposition *result)
+int address_resolve(const Rope *rope, const LineIndex *index,
+                    const Address *address, size_t current_line,
+                    Decomposition *result)
 {
     AddressKind kind;
     size_t      total;
@@ -381,14 +353,14 @@ int address_resolve(const Rope *rope, const Address *address,
     }
 
     if (kind == ADDRESS_LINES_MATCHING) {
-        ok = resolve_lines_matching(rope, address, result);
+        ok = resolve_lines_matching(rope, index, address, result);
         return ok;
     }
 
-    lines = line_count_of(rope);
+    lines = line_count_of(rope, index);
 
     if (kind == ADDRESS_CURRENT) {
-        ok = line_bounds(rope, current_line, &start_slot, &end_slot);
+        ok = line_bounds(rope, index, current_line, &start_slot, &end_slot);
         if (ok == 0) {
             return 0;
         }
@@ -399,7 +371,7 @@ int address_resolve(const Rope *rope, const Address *address,
     }
 
     if (kind == ADDRESS_LAST) {
-        ok = line_bounds(rope, lines, &start_slot, &end_slot);
+        ok = line_bounds(rope, index, lines, &start_slot, &end_slot);
         if (ok == 0) {
             return 0;
         }
@@ -410,7 +382,7 @@ int address_resolve(const Rope *rope, const Address *address,
     }
 
     if (kind == ADDRESS_LINE) {
-        ok = line_bounds(rope, first, &start_slot, &end_slot);
+        ok = line_bounds(rope, index, first, &start_slot, &end_slot);
         if (ok == 0) {
             return 0;
         }
@@ -424,13 +396,13 @@ int address_resolve(const Rope *rope, const Address *address,
         if (first > last) {
             return 0;
         }
-        ok = line_bounds(rope, first, &start_slot, &end_slot);
+        ok = line_bounds(rope, index, first, &start_slot, &end_slot);
         if (ok == 0) {
             return 0;
         }
         span_start = start_slot;
 
-        ok = line_bounds(rope, last, &start_slot, &end_slot);
+        ok = line_bounds(rope, index, last, &start_slot, &end_slot);
         if (ok == 0) {
             return 0;
         }
@@ -442,7 +414,7 @@ int address_resolve(const Rope *rope, const Address *address,
     }
 
     line = current_line;
-    ok = line_bounds(rope, line, &start_slot, &end_slot);
+    ok = line_bounds(rope, index, line, &start_slot, &end_slot);
     if (ok == 0) {
         return 0;
     }
@@ -461,13 +433,10 @@ int address_replace_all(Pool *pool, const Rope *rope,
                         size_t replacement_length,
                         Rope *result)
 {
-    Rope     scrap[SCRAP_CAPACITY];
-    Rope     survivors[2];
     Rope     built;
     Rope     joined;
     Rope     gap;
     Rope     inserted;
-    uint32_t scrap_count;
     uint32_t count;
     uint32_t index;
     size_t   position;
@@ -478,7 +447,6 @@ int address_replace_all(Pool *pool, const Rope *rope,
 
     count = decomposition->count;
     total = rope->byte_count;
-    scrap_count = 0;
 
     rope_initialize_empty(&built);
 
@@ -503,15 +471,11 @@ int address_replace_all(Pool *pool, const Rope *rope,
         if (ok == 0) {
             return 0;
         }
-        scrap_count = remember_scrap(scrap, scrap_count, &built);
-        scrap_count = remember_scrap(scrap, scrap_count, &gap);
 
         ok = rope_concat(pool, &joined, &inserted, &built);
         if (ok == 0) {
             return 0;
         }
-        scrap_count = remember_scrap(scrap, scrap_count, &joined);
-        scrap_count = remember_scrap(scrap, scrap_count, &inserted);
 
         position = end;
         index = index + 1;
@@ -525,12 +489,7 @@ int address_replace_all(Pool *pool, const Rope *rope,
     if (ok == 0) {
         return 0;
     }
-    scrap_count = remember_scrap(scrap, scrap_count, &built);
-    scrap_count = remember_scrap(scrap, scrap_count, &gap);
 
-    memcpy(&survivors[0], rope, sizeof(Rope));
-    memcpy(&survivors[1], result, sizeof(Rope));
-    rope_free_difference(pool, scrap, scrap_count, survivors, 2);
     return 1;
 }
 
@@ -543,13 +502,10 @@ int address_insert_all(Pool *pool, const Rope *rope,
                        size_t insertion_length,
                        Rope *result)
 {
-    Rope     scrap[SCRAP_CAPACITY];
-    Rope     survivors[2];
     Rope     built;
     Rope     joined;
     Rope     gap;
     Rope     inserted;
-    uint32_t scrap_count;
     uint32_t count;
     uint32_t index;
     size_t   position;
@@ -561,7 +517,6 @@ int address_insert_all(Pool *pool, const Rope *rope,
 
     count = decomposition->count;
     total = rope->byte_count;
-    scrap_count = 0;
 
     rope_initialize_empty(&built);
 
@@ -590,15 +545,11 @@ int address_insert_all(Pool *pool, const Rope *rope,
         if (ok == 0) {
             return 0;
         }
-        scrap_count = remember_scrap(scrap, scrap_count, &built);
-        scrap_count = remember_scrap(scrap, scrap_count, &gap);
 
         ok = rope_concat(pool, &joined, &inserted, &built);
         if (ok == 0) {
             return 0;
         }
-        scrap_count = remember_scrap(scrap, scrap_count, &joined);
-        scrap_count = remember_scrap(scrap, scrap_count, &inserted);
 
         position = at;
         index = index + 1;
@@ -612,11 +563,6 @@ int address_insert_all(Pool *pool, const Rope *rope,
     if (ok == 0) {
         return 0;
     }
-    scrap_count = remember_scrap(scrap, scrap_count, &built);
-    scrap_count = remember_scrap(scrap, scrap_count, &gap);
 
-    memcpy(&survivors[0], rope, sizeof(Rope));
-    memcpy(&survivors[1], result, sizeof(Rope));
-    rope_free_difference(pool, scrap, scrap_count, survivors, 2);
     return 1;
 }

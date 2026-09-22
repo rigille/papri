@@ -4,7 +4,7 @@
 #include <string.h>
 
 /* Leaves are headerless: a leaf is ROPE_LEAF_BYTES of payload and nothing
- * else. Everything known about a child — its byte count, its newline count —
+ * else. A child's byte count
  * lives in its parent's size table below. The root's measures live in the
  * Rope value itself, which is how a height-0 rope knows its own length.
  *
@@ -17,7 +17,6 @@ struct RopeNode {
     uint32_t child_count;
     void    *children[ROPE_BRANCHING];
     size_t   cumulative_bytes[ROPE_BRANCHING];
-    size_t   cumulative_newlines[ROPE_BRANCHING];
 };
 
 /* A merge can hold both parents' children plus the one or two nodes their
@@ -27,7 +26,6 @@ struct RopeNode {
 typedef struct ChildList {
     void    *nodes[CHILD_LIST_CAPACITY];
     size_t   bytes[CHILD_LIST_CAPACITY];
-    size_t   newlines[CHILD_LIST_CAPACITY];
     uint32_t count;
 } ChildList;
 
@@ -36,7 +34,6 @@ typedef struct ChildList {
 typedef struct NodePair {
     void    *nodes[2];
     size_t   bytes[2];
-    size_t   newlines[2];
     uint32_t count;
     uint32_t height;
 } NodePair;
@@ -63,28 +60,6 @@ typedef struct NodePair {
 #define EMPTY    0
 #define FAILED   (-1)
 
-/* requires: holds a read share of `length` bytes at `bytes`.
- * ensures:  the read share is returned; the result is the number of 0x0A
- *           bytes among them.
- */
-static size_t count_newlines(const unsigned char *bytes, size_t length)
-{
-    uint32_t index;
-    size_t   total;
-    unsigned char value;
-
-    total = 0;
-    index = 0;
-    while (index < length) {
-        value = bytes[index];
-        if (value == 0x0A) {
-            total = total + 1;
-        }
-        index = index + 1;
-    }
-    return total;
-}
-
 /* requires: rope_node(node, contents, share); index < node->child_count.
  * ensures:  rope_node(node, contents, share); the result is that child's own
  *           byte count. No memory is written.
@@ -102,23 +77,6 @@ static size_t node_child_bytes(const RopeNode *node, uint32_t index)
     return current - previous;
 }
 
-/* requires: rope_node(node, contents, share); index < node->child_count.
- * ensures:  rope_node(node, contents, share); the result is that child's own
- *           newline count. No memory is written.
- */
-static size_t node_child_newlines(const RopeNode *node, uint32_t index)
-{
-    size_t   current;
-    size_t   previous;
-
-    current = node->cumulative_newlines[index];
-    if (index == 0) {
-        return current;
-    }
-    previous = node->cumulative_newlines[index - 1];
-    return current - previous;
-}
-
 /* requires: node_pool(pool, live, residual).
  * ensures:  node_pool(pool, live', residual) with one fresh leaf, and the
  *           result points at it; or the result is null.
@@ -133,26 +91,23 @@ static unsigned char *allocate_leaf(Pool *pool)
 
 /* requires: node_pool(pool, live, residual); holds read shares of the `count`
  *           children described by the three parallel arrays;
- *           count <= ROPE_BRANCHING; *out_bytes and *out_newlines writable.
+ *           count <= ROPE_BRANCHING; *out_bytes is writable.
  * ensures:  node_pool(pool, live', residual) with one fresh sealed node whose
- *           children are those, *out_bytes and *out_newlines are its totals,
+ *           children are those, *out_bytes is its total,
  *           and the result points at it; or the result is null and the
  *           outputs are unspecified.
  */
 static RopeNode *make_node(Pool *pool, uint32_t height,
                            void *const *children,
                            const size_t *child_bytes,
-                           const size_t *child_newlines,
                            uint32_t count,
-                           size_t *out_bytes, size_t *out_newlines)
+                           size_t *out_bytes)
 {
     void     *allocation;
     RopeNode *node;
     uint32_t  index;
     size_t    running_bytes;
-    size_t    running_newlines;
     size_t    own_bytes;
-    size_t    own_newlines;
     void     *child;
 
     allocation = pool_allocate(pool, sizeof(RopeNode));
@@ -165,24 +120,19 @@ static RopeNode *make_node(Pool *pool, uint32_t height,
     node->child_count = count;
 
     running_bytes = 0;
-    running_newlines = 0;
     index = 0;
     while (index < count) {
         child = children[index];
         own_bytes = child_bytes[index];
-        own_newlines = child_newlines[index];
 
         running_bytes = running_bytes + own_bytes;
-        running_newlines = running_newlines + own_newlines;
 
         node->children[index] = child;
         node->cumulative_bytes[index] = running_bytes;
-        node->cumulative_newlines[index] = running_newlines;
         index = index + 1;
     }
 
     *out_bytes = running_bytes;
-    *out_newlines = running_newlines;
     return node;
 }
 
@@ -193,8 +143,7 @@ static RopeNode *make_node(Pool *pool, uint32_t height,
  *           share of `node`.
  * ensures:  *list has that child appended.
  */
-static void child_list_append(ChildList *list, void *node, size_t bytes,
-                              size_t newlines);
+static void child_list_append(ChildList *list, void *node, size_t bytes);
 
 /* requires: rope_node(node, contents, share) at `height` above 0; offset is
  *           within its byte count.
@@ -346,7 +295,6 @@ static int apply_rebalance(Pool *pool, uint32_t height, ChildList *list,
     ChildList       rebuilt;
     void           *gathered_nodes[ROPE_BRANCHING];
     size_t          gathered_bytes[ROPE_BRANCHING];
-    size_t          gathered_newlines[ROPE_BRANCHING];
     const RopeNode *source_node;
     const unsigned char *source_leaf;
     unsigned char  *leaf;
@@ -362,12 +310,8 @@ static int apply_rebalance(Pool *pool, uint32_t height, ChildList *list,
     uint32_t        child_total;
     size_t          source_bytes;
     size_t          own_bytes;
-    size_t          own_newlines;
     size_t          built_bytes;
-    size_t          built_newlines;
     size_t          total_bytes;
-    size_t          total_newlines;
-    size_t          newlines;
     void           *child;
 
     rebuilt.count = 0;
@@ -400,8 +344,7 @@ static int apply_rebalance(Pool *pool, uint32_t height, ChildList *list,
                     slot_offset = 0;
                 }
             }
-            newlines = count_newlines(leaf, want);
-            child_list_append(&rebuilt, leaf, want, newlines);
+            child_list_append(&rebuilt, leaf, want);
         } else {
             filled = 0;
             while (filled < want) {
@@ -418,10 +361,7 @@ static int apply_rebalance(Pool *pool, uint32_t height, ChildList *list,
                     gathered_nodes[filled + step] = child;
                     own_bytes = node_child_bytes(source_node,
                                                 slot_offset + step);
-                    own_newlines = node_child_newlines(source_node,
-                                                       slot_offset + step);
                     gathered_bytes[filled + step] = own_bytes;
-                    gathered_newlines[filled + step] = own_newlines;
                     step = step + 1;
                 }
                 filled = filled + portion;
@@ -431,15 +371,12 @@ static int apply_rebalance(Pool *pool, uint32_t height, ChildList *list,
                     slot_offset = 0;
                 }
             }
-            built = make_node(pool, height, gathered_nodes, gathered_bytes,
-                              gathered_newlines, want, &total_bytes,
-                              &total_newlines);
+            built = make_node(pool, height, gathered_nodes, gathered_bytes, want, &total_bytes);
             if (built == NULL) {
                 return FAILED;
             }
             built_bytes = total_bytes;
-            built_newlines = total_newlines;
-            child_list_append(&rebuilt, built, built_bytes, built_newlines);
+            child_list_append(&rebuilt, built, built_bytes);
         }
 
         produced = produced + 1;
@@ -513,7 +450,6 @@ static int pack_children(Pool *pool, uint32_t height, ChildList *list,
     RopeNode        *node;
     void *const     *child_slice;
     const size_t    *bytes_slice;
-    const size_t    *newlines_slice;
 
     /* Redistribute before grouping: this is where the "Balanced" happens,
      * and it is what keeps the radix guess in child_for_offset close to the
@@ -526,9 +462,8 @@ static int pack_children(Pool *pool, uint32_t height, ChildList *list,
     count = list->count;
 
     if (count <= ROPE_BRANCHING) {
-        node = make_node(pool, height, list->nodes, list->bytes,
-                         list->newlines, count,
-                         &result->bytes[0], &result->newlines[0]);
+        node = make_node(pool, height, list->nodes, list->bytes, count,
+                         &result->bytes[0]);
         if (node == NULL) {
             return FAILED;
         }
@@ -541,8 +476,8 @@ static int pack_children(Pool *pool, uint32_t height, ChildList *list,
     left_count = count / 2;
     right_count = count - left_count;
 
-    node = make_node(pool, height, list->nodes, list->bytes, list->newlines,
-                     left_count, &result->bytes[0], &result->newlines[0]);
+    node = make_node(pool, height, list->nodes, list->bytes,
+                     left_count, &result->bytes[0]);
     if (node == NULL) {
         return FAILED;
     }
@@ -550,10 +485,9 @@ static int pack_children(Pool *pool, uint32_t height, ChildList *list,
 
     child_slice = list->nodes + left_count;
     bytes_slice = list->bytes + left_count;
-    newlines_slice = list->newlines + left_count;
 
-    node = make_node(pool, height, child_slice, bytes_slice, newlines_slice,
-                     right_count, &result->bytes[1], &result->newlines[1]);
+    node = make_node(pool, height, child_slice, bytes_slice,
+                     right_count, &result->bytes[1]);
     if (node == NULL) {
         return FAILED;
     }
@@ -567,15 +501,13 @@ static int pack_children(Pool *pool, uint32_t height, ChildList *list,
  *           read share of `node`.
  * ensures:  *list has that child appended.
  */
-static void child_list_append(ChildList *list, void *node, size_t bytes,
-                              size_t newlines)
+static void child_list_append(ChildList *list, void *node, size_t bytes)
 {
     uint32_t count;
 
     count = list->count;
     list->nodes[count] = node;
     list->bytes[count] = bytes;
-    list->newlines[count] = newlines;
     list->count = count + 1;
 }
 
@@ -614,17 +546,16 @@ static void collapse_root(Rope *rope)
  *
  * requires: node_pool(pool, live, residual); holds a read share of the
  *           subtree at `node`, whose measures are node_bytes and
- *           node_newlines; the out-parameters are writable.
+ *           the out-parameters are writable.
  * ensures:  node_pool(pool, live', residual); on PRODUCED the outputs hold a
  *           subtree at `height` denoting the first `count` bytes, sharing
  *           whatever nodes it can with the input; on EMPTY count was zero; on
  *           FAILED allocation failed.
  */
 static int take_node(Pool *pool, void *node, uint32_t height,
-                     size_t node_bytes, size_t node_newlines,
+                     size_t node_bytes,
                      size_t count,
-                     void **out_node, size_t *out_bytes,
-                     size_t *out_newlines)
+                     void **out_node, size_t *out_bytes)
 {
     const RopeNode *source;
     ChildList       list;
@@ -635,15 +566,12 @@ static int take_node(Pool *pool, void *node, uint32_t height,
     size_t          running;
     size_t          next_running;
     size_t          own_bytes;
-    size_t          own_newlines;
     size_t          remainder;
     void           *child;
     void           *sub_node;
     size_t          sub_bytes;
-    size_t          sub_newlines;
     void           *taken_node;
     size_t          taken_bytes;
-    size_t          taken_newlines;
     RopeNode       *built;
     int             outcome;
 
@@ -653,7 +581,6 @@ static int take_node(Pool *pool, void *node, uint32_t height,
     if (count >= node_bytes) {
         *out_node = node;
         *out_bytes = node_bytes;
-        *out_newlines = node_newlines;
         return PRODUCED;
     }
 
@@ -666,7 +593,6 @@ static int take_node(Pool *pool, void *node, uint32_t height,
         memcpy(leaf, source_bytes, count);
         *out_node = leaf;
         *out_bytes = count;
-        *out_newlines = count_newlines(leaf, count);
         return PRODUCED;
     }
 
@@ -677,12 +603,11 @@ static int take_node(Pool *pool, void *node, uint32_t height,
     index = 0;
     while (index < child_total) {
         own_bytes = node_child_bytes(source, index);
-        own_newlines = node_child_newlines(source, index);
         next_running = running + own_bytes;
         child = source->children[index];
 
         if (next_running <= count) {
-            child_list_append(&list, child, own_bytes, own_newlines);
+            child_list_append(&list, child, own_bytes);
             running = next_running;
             if (running == count) {
                 index = child_total;
@@ -692,17 +617,15 @@ static int take_node(Pool *pool, void *node, uint32_t height,
         } else {
             remainder = count - running;
             outcome = take_node(pool, child, height - 1, own_bytes,
-                                own_newlines, remainder,
-                                &sub_node, &sub_bytes, &sub_newlines);
+                                remainder,
+                                &sub_node, &sub_bytes);
             if (outcome == FAILED) {
                 return FAILED;
             }
             if (outcome == PRODUCED) {
                 taken_node = sub_node;
                 taken_bytes = sub_bytes;
-                taken_newlines = sub_newlines;
-                child_list_append(&list, taken_node, taken_bytes,
-                                  taken_newlines);
+                child_list_append(&list, taken_node, taken_bytes);
             }
             index = child_total;
         }
@@ -713,8 +636,8 @@ static int take_node(Pool *pool, void *node, uint32_t height,
         return EMPTY;
     }
 
-    built = make_node(pool, height, list.nodes, list.bytes, list.newlines,
-                      child_total, out_bytes, out_newlines);
+    built = make_node(pool, height, list.nodes, list.bytes,
+                      child_total, out_bytes);
     if (built == NULL) {
         return FAILED;
     }
@@ -726,17 +649,16 @@ static int take_node(Pool *pool, void *node, uint32_t height,
  *
  * requires: node_pool(pool, live, residual); holds a read share of the
  *           subtree at `node`, whose measures are node_bytes and
- *           node_newlines; the out-parameters are writable.
+ *           the out-parameters are writable.
  * ensures:  node_pool(pool, live', residual); on PRODUCED the outputs hold a
  *           subtree at `height` denoting the bytes from `count` onward,
  *           sharing whatever it can; on EMPTY nothing remained; on FAILED
  *           allocation failed.
  */
 static int drop_node(Pool *pool, void *node, uint32_t height,
-                     size_t node_bytes, size_t node_newlines,
+                     size_t node_bytes,
                      size_t count,
-                     void **out_node, size_t *out_bytes,
-                     size_t *out_newlines)
+                     void **out_node, size_t *out_bytes)
 {
     const RopeNode *source;
     ChildList       list;
@@ -747,23 +669,19 @@ static int drop_node(Pool *pool, void *node, uint32_t height,
     size_t          running;
     size_t          next_running;
     size_t          own_bytes;
-    size_t          own_newlines;
     size_t          remainder;
     size_t          kept;
     void           *child;
     void           *sub_node;
     size_t          sub_bytes;
-    size_t          sub_newlines;
     void           *taken_node;
     size_t          taken_bytes;
-    size_t          taken_newlines;
     RopeNode       *built;
     int             outcome;
 
     if (count == 0) {
         *out_node = node;
         *out_bytes = node_bytes;
-        *out_newlines = node_newlines;
         return PRODUCED;
     }
     if (count >= node_bytes) {
@@ -780,7 +698,6 @@ static int drop_node(Pool *pool, void *node, uint32_t height,
         memcpy(leaf, source_bytes + count, kept);
         *out_node = leaf;
         *out_bytes = kept;
-        *out_newlines = count_newlines(leaf, kept);
         return PRODUCED;
     }
 
@@ -791,7 +708,6 @@ static int drop_node(Pool *pool, void *node, uint32_t height,
     index = 0;
     while (index < child_total) {
         own_bytes = node_child_bytes(source, index);
-        own_newlines = node_child_newlines(source, index);
         next_running = running + own_bytes;
         child = source->children[index];
 
@@ -800,21 +716,19 @@ static int drop_node(Pool *pool, void *node, uint32_t height,
             running = next_running;
         } else {
             if (running >= count) {
-                child_list_append(&list, child, own_bytes, own_newlines);
+                child_list_append(&list, child, own_bytes);
             } else {
                 remainder = count - running;
                 outcome = drop_node(pool, child, height - 1, own_bytes,
-                                    own_newlines, remainder,
-                                    &sub_node, &sub_bytes, &sub_newlines);
+                                    remainder,
+                                    &sub_node, &sub_bytes);
                 if (outcome == FAILED) {
                     return FAILED;
                 }
                 if (outcome == PRODUCED) {
                     taken_node = sub_node;
                     taken_bytes = sub_bytes;
-                    taken_newlines = sub_newlines;
-                    child_list_append(&list, taken_node, taken_bytes,
-                                      taken_newlines);
+                    child_list_append(&list, taken_node, taken_bytes);
                 }
                 running = next_running;
             }
@@ -827,8 +741,8 @@ static int drop_node(Pool *pool, void *node, uint32_t height,
         return EMPTY;
     }
 
-    built = make_node(pool, height, list.nodes, list.bytes, list.newlines,
-                      child_total, out_bytes, out_newlines);
+    built = make_node(pool, height, list.nodes, list.bytes,
+                      child_total, out_bytes);
     if (built == NULL) {
         return FAILED;
     }
@@ -850,9 +764,9 @@ static int drop_node(Pool *pool, void *node, uint32_t height,
  */
 static int concat_rec(Pool *pool,
                       void *left, uint32_t left_height,
-                      size_t left_bytes, size_t left_newlines,
+                      size_t left_bytes,
                       void *right, uint32_t right_height,
-                      size_t right_bytes, size_t right_newlines,
+                      size_t right_bytes,
                       NodePair *result)
 {
     const RopeNode *left_node;
@@ -868,9 +782,7 @@ static int concat_rec(Pool *pool,
     uint32_t        right_count;
     uint32_t        index;
     size_t          edge_bytes;
-    size_t          edge_newlines;
     size_t          other_bytes;
-    size_t          other_newlines;
     void           *edge_child;
     void           *other_child;
     int             outcome;
@@ -889,17 +801,14 @@ static int concat_rec(Pool *pool,
                 memcpy(leaf + left_bytes, right_source, right_bytes);
                 result->nodes[0] = leaf;
                 result->bytes[0] = total;
-                result->newlines[0] = left_newlines + right_newlines;
                 result->count = 1;
                 result->height = 0;
                 return PRODUCED;
             }
             result->nodes[0] = left;
             result->bytes[0] = left_bytes;
-            result->newlines[0] = left_newlines;
             result->nodes[1] = right;
             result->bytes[1] = right_bytes;
-            result->newlines[1] = right_newlines;
             result->count = 2;
             result->height = 0;
             return PRODUCED;
@@ -913,11 +822,9 @@ static int concat_rec(Pool *pool,
         left_count = left_node->child_count;
         edge_child = left_node->children[left_count - 1];
         edge_bytes = node_child_bytes(left_node, left_count - 1);
-        edge_newlines = node_child_newlines(left_node, left_count - 1);
 
         outcome = concat_rec(pool, edge_child, left_height - 1, edge_bytes,
-                             edge_newlines, right, right_height, right_bytes,
-                             right_newlines, &middle);
+                             right, right_height, right_bytes, &middle);
         if (outcome == FAILED) {
             return FAILED;
         }
@@ -926,8 +833,7 @@ static int concat_rec(Pool *pool,
         while (index + 1 < left_count) {
             other_child = left_node->children[index];
             other_bytes = node_child_bytes(left_node, index);
-            other_newlines = node_child_newlines(left_node, index);
-            child_list_append(&list, other_child, other_bytes, other_newlines);
+            child_list_append(&list, other_child, other_bytes);
             index = index + 1;
         }
         index = 0;
@@ -935,8 +841,7 @@ static int concat_rec(Pool *pool,
         while (index < middle_count) {
             other_child = middle.nodes[index];
             other_bytes = middle.bytes[index];
-            other_newlines = middle.newlines[index];
-            child_list_append(&list, other_child, other_bytes, other_newlines);
+            child_list_append(&list, other_child, other_bytes);
             index = index + 1;
         }
         outcome = pack_children(pool, left_height, &list, result);
@@ -948,11 +853,9 @@ static int concat_rec(Pool *pool,
         right_count = right_node->child_count;
         edge_child = right_node->children[0];
         edge_bytes = node_child_bytes(right_node, 0);
-        edge_newlines = node_child_newlines(right_node, 0);
 
         outcome = concat_rec(pool, left, left_height, left_bytes,
-                             left_newlines, edge_child, right_height - 1,
-                             edge_bytes, edge_newlines, &middle);
+                             edge_child, right_height - 1, edge_bytes, &middle);
         if (outcome == FAILED) {
             return FAILED;
         }
@@ -962,16 +865,14 @@ static int concat_rec(Pool *pool,
         while (index < middle_count) {
             other_child = middle.nodes[index];
             other_bytes = middle.bytes[index];
-            other_newlines = middle.newlines[index];
-            child_list_append(&list, other_child, other_bytes, other_newlines);
+            child_list_append(&list, other_child, other_bytes);
             index = index + 1;
         }
         index = 1;
         while (index < right_count) {
             other_child = right_node->children[index];
             other_bytes = node_child_bytes(right_node, index);
-            other_newlines = node_child_newlines(right_node, index);
-            child_list_append(&list, other_child, other_bytes, other_newlines);
+            child_list_append(&list, other_child, other_bytes);
             index = index + 1;
         }
         outcome = pack_children(pool, right_height, &list, result);
@@ -986,14 +887,11 @@ static int concat_rec(Pool *pool,
 
     edge_child = left_node->children[left_count - 1];
     edge_bytes = node_child_bytes(left_node, left_count - 1);
-    edge_newlines = node_child_newlines(left_node, left_count - 1);
     other_child = right_node->children[0];
     other_bytes = node_child_bytes(right_node, 0);
-    other_newlines = node_child_newlines(right_node, 0);
 
     outcome = concat_rec(pool, edge_child, left_height - 1, edge_bytes,
-                         edge_newlines, other_child, right_height - 1,
-                         other_bytes, other_newlines, &middle);
+                         other_child, right_height - 1, other_bytes, &middle);
     if (outcome == FAILED) {
         return FAILED;
     }
@@ -1002,8 +900,7 @@ static int concat_rec(Pool *pool,
     while (index + 1 < left_count) {
         other_child = left_node->children[index];
         other_bytes = node_child_bytes(left_node, index);
-        other_newlines = node_child_newlines(left_node, index);
-        child_list_append(&list, other_child, other_bytes, other_newlines);
+        child_list_append(&list, other_child, other_bytes);
         index = index + 1;
     }
     index = 0;
@@ -1011,16 +908,14 @@ static int concat_rec(Pool *pool,
     while (index < middle_count) {
         other_child = middle.nodes[index];
         other_bytes = middle.bytes[index];
-        other_newlines = middle.newlines[index];
-        child_list_append(&list, other_child, other_bytes, other_newlines);
+        child_list_append(&list, other_child, other_bytes);
         index = index + 1;
     }
     index = 1;
     while (index < right_count) {
         other_child = right_node->children[index];
         other_bytes = node_child_bytes(right_node, index);
-        other_newlines = node_child_newlines(right_node, index);
-        child_list_append(&list, other_child, other_bytes, other_newlines);
+        child_list_append(&list, other_child, other_bytes);
         index = index + 1;
     }
 
@@ -1036,7 +931,6 @@ void rope_initialize_empty(Rope *rope)
     rope->root = NULL;
     rope->height = 0;
     rope->byte_count = 0;
-    rope->newline_count = 0;
 }
 
 /* requires: node_pool(pool, live, residual); holds a read share of `length`
@@ -1049,7 +943,6 @@ int rope_from_bytes(Pool *pool, const unsigned char *bytes, size_t length,
 {
     void          **nodes;
     size_t         *sizes;
-    size_t         *newlines;
     unsigned char  *leaf;
     RopeNode       *built;
     size_t          leaf_total;
@@ -1063,12 +956,9 @@ int rope_from_bytes(Pool *pool, const unsigned char *bytes, size_t length,
     uint32_t        group;
     uint32_t        height;
     size_t          slot_bytes;
-    size_t          slot_newlines;
     size_t          built_bytes;
-    size_t          built_newlines;
     void           *root_node;
     size_t          root_bytes;
-    size_t          root_newlines;
 
     rope_initialize_empty(rope);
     if (length == 0) {
@@ -1084,11 +974,9 @@ int rope_from_bytes(Pool *pool, const unsigned char *bytes, size_t length,
     /* Transient scaffolding for the bottom-up build, not part of the tree. */
     nodes = malloc(leaf_total * sizeof(void *));
     sizes = malloc(leaf_total * sizeof(size_t));
-    newlines = malloc(leaf_total * sizeof(size_t));
-    if (nodes == NULL || sizes == NULL || newlines == NULL) {
+    if (nodes == NULL || sizes == NULL) {
         free(nodes);
         free(sizes);
-        free(newlines);
         return 0;
     }
 
@@ -1103,13 +991,11 @@ int rope_from_bytes(Pool *pool, const unsigned char *bytes, size_t length,
         if (leaf == NULL) {
             free(nodes);
             free(sizes);
-            free(newlines);
-            return 0;
+                return 0;
         }
         memcpy(leaf, bytes + offset, chunk);
         nodes[index] = leaf;
         sizes[index] = chunk;
-        newlines[index] = count_newlines(leaf, chunk);
         offset = offset + chunk;
         index = index + 1;
     }
@@ -1121,8 +1007,7 @@ int rope_from_bytes(Pool *pool, const unsigned char *bytes, size_t length,
         if (height > ROPE_MAX_HEIGHT) {
             free(nodes);
             free(sizes);
-            free(newlines);
-            return 0;
+                return 0;
         }
         read_index = 0;
         write_index = 0;
@@ -1133,19 +1018,15 @@ int rope_from_bytes(Pool *pool, const unsigned char *bytes, size_t length,
             }
             group = (uint32_t)remaining;
             built = make_node(pool, height, nodes + read_index,
-                              sizes + read_index, newlines + read_index,
-                              group, &slot_bytes, &slot_newlines);
+                              sizes + read_index, group, &slot_bytes);
             if (built == NULL) {
                 free(nodes);
                 free(sizes);
-                free(newlines);
-                return 0;
+                        return 0;
             }
             built_bytes = slot_bytes;
-            built_newlines = slot_newlines;
             nodes[write_index] = built;
             sizes[write_index] = built_bytes;
-            newlines[write_index] = built_newlines;
             write_index = write_index + 1;
             read_index = read_index + group;
         }
@@ -1154,15 +1035,12 @@ int rope_from_bytes(Pool *pool, const unsigned char *bytes, size_t length,
 
     root_node = nodes[0];
     root_bytes = sizes[0];
-    root_newlines = newlines[0];
     rope->root = root_node;
     rope->height = height;
     rope->byte_count = root_bytes;
-    rope->newline_count = root_newlines;
 
     free(nodes);
     free(sizes);
-    free(newlines);
     return 1;
 }
 
@@ -1175,18 +1053,6 @@ size_t rope_byte_count(const Rope *rope)
     size_t   total;
 
     total = rope->byte_count;
-    return total;
-}
-
-/* requires: rope(rope, bytes, share).
- * ensures:  rope(rope, bytes, share); the result is the newline count. No
- *           memory is written.
- */
-size_t rope_newline_count(const Rope *rope)
-{
-    size_t   total;
-
-    total = rope->newline_count;
     return total;
 }
 
@@ -1336,17 +1202,13 @@ int rope_split(Pool *pool, const Rope *rope, size_t offset,
     void    *root;
     uint32_t height;
     size_t   total;
-    size_t   newlines;
     void    *produced_node;
     size_t   produced_bytes;
-    size_t   produced_newlines;
     void    *stored_node;
     size_t   stored_bytes;
-    size_t   stored_newlines;
     int      outcome;
 
     total = rope->byte_count;
-    newlines = rope->newline_count;
     root = rope->root;
     height = rope->height;
 
@@ -1357,35 +1219,31 @@ int rope_split(Pool *pool, const Rope *rope, size_t offset,
         return 1;
     }
 
-    outcome = take_node(pool, root, height, total, newlines, offset,
-                        &produced_node, &produced_bytes, &produced_newlines);
+    outcome = take_node(pool, root, height, total, offset,
+                        &produced_node, &produced_bytes);
     if (outcome == FAILED) {
         return 0;
     }
     if (outcome == PRODUCED) {
         stored_node = produced_node;
         stored_bytes = produced_bytes;
-        stored_newlines = produced_newlines;
         left->root = stored_node;
         left->height = height;
         left->byte_count = stored_bytes;
-        left->newline_count = stored_newlines;
         collapse_root(left);
     }
 
-    outcome = drop_node(pool, root, height, total, newlines, offset,
-                        &produced_node, &produced_bytes, &produced_newlines);
+    outcome = drop_node(pool, root, height, total, offset,
+                        &produced_node, &produced_bytes);
     if (outcome == FAILED) {
         return 0;
     }
     if (outcome == PRODUCED) {
         stored_node = produced_node;
         stored_bytes = produced_bytes;
-        stored_newlines = produced_newlines;
         right->root = stored_node;
         right->height = height;
         right->byte_count = stored_bytes;
-        right->newline_count = stored_newlines;
         collapse_root(right);
     }
 
@@ -1403,22 +1261,16 @@ int rope_concat(Pool *pool, const Rope *left, const Rope *right, Rope *result)
     RopeNode *root;
     size_t    left_bytes;
     size_t    right_bytes;
-    size_t    left_newlines;
-    size_t    right_newlines;
     uint32_t  left_height;
     uint32_t  right_height;
     size_t    total_bytes;
-    size_t    total_newlines;
     size_t    slot_bytes;
-    size_t    slot_newlines;
     uint32_t  height;
     uint32_t  pair_count;
     void     *first_node;
     size_t    first_bytes;
-    size_t    first_newlines;
     void     *second_node;
     size_t    second_bytes;
-    size_t    second_newlines;
     void     *left_root;
     void     *right_root;
     int       outcome;
@@ -1440,34 +1292,29 @@ int rope_concat(Pool *pool, const Rope *left, const Rope *right, Rope *result)
         return 0;
     }
 
-    left_newlines = left->newline_count;
-    right_newlines = right->newline_count;
     left_height = left->height;
     right_height = right->height;
     left_root = left->root;
     right_root = right->root;
 
     outcome = concat_rec(pool, left_root, left_height, left_bytes,
-                         left_newlines, right_root, right_height, right_bytes,
-                         right_newlines, &pair);
+                         right_root, right_height, right_bytes,
+                         &pair);
     if (outcome == FAILED) {
         return 0;
     }
 
-    total_newlines = left_newlines + right_newlines;
     height = pair.height;
     pair_count = pair.count;
 
     first_node = pair.nodes[0];
     first_bytes = pair.bytes[0];
-    first_newlines = pair.newlines[0];
 
     if (pair_count == 1) {
         rope_initialize_empty(result);
         result->root = first_node;
         result->height = height;
         result->byte_count = total_bytes;
-        result->newline_count = total_newlines;
         return 1;
     }
 
@@ -1478,14 +1325,12 @@ int rope_concat(Pool *pool, const Rope *left, const Rope *right, Rope *result)
 
     second_node = pair.nodes[1];
     second_bytes = pair.bytes[1];
-    second_newlines = pair.newlines[1];
 
     list.count = 0;
-    child_list_append(&list, first_node, first_bytes, first_newlines);
-    child_list_append(&list, second_node, second_bytes, second_newlines);
+    child_list_append(&list, first_node, first_bytes);
+    child_list_append(&list, second_node, second_bytes);
 
-    root = make_node(pool, height, list.nodes, list.bytes, list.newlines, 2,
-                     &slot_bytes, &slot_newlines);
+    root = make_node(pool, height, list.nodes, list.bytes, 2, &slot_bytes);
     if (root == NULL) {
         return 0;
     }
@@ -1494,7 +1339,6 @@ int rope_concat(Pool *pool, const Rope *left, const Rope *right, Rope *result)
     result->root = root;
     result->height = height;
     result->byte_count = total_bytes;
-    result->newline_count = total_newlines;
     return 1;
 }
 
@@ -1554,184 +1398,21 @@ int rope_replace_span(Pool *pool, const Rope *rope,
     return outcome;
 }
 
-/* requires: holds a read share of the subtree at `node`; offset is at most
- *           its byte count.
- * ensures:  the read share is returned; the result is the number of newlines
- *           strictly before that offset.
- */
-static size_t rank_newlines(const void *node, uint32_t height,
-                            size_t offset)
-{
-    const RopeNode      *source;
-    const unsigned char *leaf;
-    uint32_t             index;
-    uint32_t             child_count;
-    size_t               boundary;
-    size_t               previous;
-    size_t               previous_newlines;
-    size_t               deeper;
-    const void          *child;
-
-    if (height == 0) {
-        leaf = node;
-        return count_newlines(leaf, offset);
-    }
-
-    source = node;
-    child_count = source->child_count;
-    index = 0;
-    previous = 0;
-    previous_newlines = 0;
-    while (index < child_count) {
-        boundary = source->cumulative_bytes[index];
-        if (offset <= boundary) {
-            child = source->children[index];
-            deeper = rank_newlines(child, height - 1, offset - previous);
-            return previous_newlines + deeper;
-        }
-        previous = boundary;
-        previous_newlines = source->cumulative_newlines[index];
-        index = index + 1;
-    }
-    return previous_newlines;
-}
-
-/* requires: holds a read share of the subtree at `node`, which contains more
- *           than `which` newlines; *offset writable.
- * ensures:  the read share is returned; *offset is the position of the
- *           newline with that zero-based index.
- */
-static void select_newline(const void *node, uint32_t height, size_t which,
-                           size_t *offset)
-{
-    size_t               resolved;
-    const RopeNode      *source;
-    const unsigned char *leaf;
-    uint32_t             index;
-    uint32_t             child_count;
-    size_t               boundary;
-    size_t               previous;
-    size_t               previous_bytes;
-    size_t               seen;
-    size_t               deeper;
-    unsigned char        value;
-    const void          *child;
-
-    if (height == 0) {
-        leaf = node;
-        index = 0;
-        seen = 0;
-        while (index < ROPE_LEAF_BYTES) {
-            value = leaf[index];
-            if (value == 0x0A) {
-                if (seen == which) {
-                    *offset = index;
-                    return;
-                }
-                seen = seen + 1;
-            }
-            index = index + 1;
-        }
-        return;
-    }
-
-    source = node;
-    child_count = source->child_count;
-    index = 0;
-    previous = 0;
-    previous_bytes = 0;
-    while (index < child_count) {
-        boundary = source->cumulative_newlines[index];
-        if (which < boundary) {
-            child = source->children[index];
-            deeper = 0;
-            select_newline(child, height - 1, which - previous, &deeper);
-            resolved = deeper;
-            *offset = previous_bytes + resolved;
-            return;
-        }
-        previous = boundary;
-        previous_bytes = source->cumulative_bytes[index];
-        index = index + 1;
-    }
-}
-
-/* requires: rope(rope, bytes, share); *offset writable.
- * ensures:  as rope.h.
- */
-int rope_line_start(const Rope *rope, size_t line_index, size_t *offset)
-{
-    size_t      newlines;
-    size_t      resolved;
-    uint32_t    height;
-    size_t      position;
-    const void *root;
-
-    if (line_index == 0) {
-        *offset = 0;
-        return 1;
-    }
-
-    newlines = rope->newline_count;
-    if (line_index > newlines) {
-        return 0;
-    }
-
-    root = rope->root;
-    height = rope->height;
-    position = 0;
-    select_newline(root, height, line_index - 1, &position);
-    resolved = position;
-    *offset = resolved + 1;
-    return 1;
-}
-
-/* requires: rope(rope, bytes, share); *line_index writable.
- * ensures:  as rope.h.
- */
-int rope_line_of_offset(const Rope *rope, size_t offset,
-                        size_t *line_index)
-{
-    size_t      total;
-    uint32_t    height;
-    size_t      rank;
-    const void *root;
-
-    total = rope->byte_count;
-    if (offset > total) {
-        return 0;
-    }
-    if (total == 0) {
-        *line_index = 0;
-        return 1;
-    }
-
-    root = rope->root;
-    height = rope->height;
-    rank = rank_newlines(root, height, offset);
-    *line_index = rank;
-    return 1;
-}
-
 /* requires: holds a read share of the subtree at `node`; the out-parameters
  *           are writable.
  * ensures:  the read share is returned; the result is 1 when every structural
  *           invariant holds beneath `node`, and the measures are reported.
  */
-static int check_node(const void *node, uint32_t height, size_t *out_bytes,
-                      size_t *out_newlines)
+static int check_node(const void *node, uint32_t height,
+                      size_t *out_bytes)
 {
     size_t          slot_bytes;
-    size_t          slot_newlines;
     size_t          measured_bytes;
-    size_t          measured_newlines;
     const RopeNode *source;
     uint32_t        index;
     uint32_t        child_count;
     size_t          running_bytes;
-    size_t          running_newlines;
     size_t          child_bytes;
-    size_t          child_newlines;
     size_t          recorded;
     const void     *child;
     int             ok;
@@ -1756,7 +1437,6 @@ static int check_node(const void *node, uint32_t height, size_t *out_bytes,
     }
 
     running_bytes = 0;
-    running_newlines = 0;
     index = 0;
     while (index < child_count) {
         child = source->children[index];
@@ -1764,7 +1444,6 @@ static int check_node(const void *node, uint32_t height, size_t *out_bytes,
             return 0;
         }
         child_bytes = node_child_bytes(source, index);
-        child_newlines = node_child_newlines(source, index);
 
         if (height == 1) {
             if (child_bytes > ROPE_LEAF_BYTES) {
@@ -1774,27 +1453,21 @@ static int check_node(const void *node, uint32_t height, size_t *out_bytes,
                 return 0;
             }
         } else {
-            ok = check_node(child, height - 1, &slot_bytes, &slot_newlines);
+            ok = check_node(child, height - 1, &slot_bytes);
             if (ok == 0) {
                 return 0;
             }
             measured_bytes = slot_bytes;
-            measured_newlines = slot_newlines;
             if (measured_bytes != child_bytes) {
-                return 0;
-            }
-            if (measured_newlines != child_newlines) {
                 return 0;
             }
         }
 
         running_bytes = running_bytes + child_bytes;
-        running_newlines = running_newlines + child_newlines;
         index = index + 1;
     }
 
     *out_bytes = running_bytes;
-    *out_newlines = running_newlines;
     return 1;
 }
 
@@ -1805,12 +1478,9 @@ static int check_node(const void *node, uint32_t height, size_t *out_bytes,
 int rope_check_invariants(const Rope *rope)
 {
     size_t      total;
-    size_t      newlines;
     uint32_t    height;
     size_t      measured_bytes;
-    size_t      measured_newlines;
     size_t      counted_bytes;
-    size_t      counted_newlines;
     const void *root;
     int         ok;
 
@@ -1838,18 +1508,12 @@ int rope_check_invariants(const Rope *rope)
     }
 
     measured_bytes = 0;
-    measured_newlines = 0;
-    ok = check_node(root, height, &measured_bytes, &measured_newlines);
+    ok = check_node(root, height, &measured_bytes);
     if (ok == 0) {
         return 0;
     }
     counted_bytes = measured_bytes;
-    counted_newlines = measured_newlines;
     if (counted_bytes != total) {
-        return 0;
-    }
-    newlines = rope->newline_count;
-    if (counted_newlines != newlines) {
         return 0;
     }
     return 1;
@@ -1865,8 +1529,6 @@ int rope_slice(Pool *pool, const Rope *rope, size_t start, size_t end,
     Rope     tail;
     Rope     trailing;
     Rope     leading;
-    Rope     scrap[3];
-    Rope     survivors[2];
     size_t   total;
     int      outcome;
 
@@ -1888,243 +1550,11 @@ int rope_slice(Pool *pool, const Rope *rope, size_t start, size_t end,
     }
     memcpy(slice, &tail, sizeof(Rope));
 
-    /* Two splits to keep one third of the result: the other two thirds, and
-     * the intermediate they were cut from, are garbage the moment we
-     * return. Everything they share is shared with `rope`, which survives,
-     * so the walk prunes it and frees only the spines this call invented.
-     */
-    memcpy(&scrap[0], &head, sizeof(Rope));
-    memcpy(&scrap[1], &trailing, sizeof(Rope));
-    memcpy(&scrap[2], &leading, sizeof(Rope));
-    memcpy(&survivors[0], rope, sizeof(Rope));
-    memcpy(&survivors[1], slice, sizeof(Rope));
-    rope_free_difference(pool, scrap, 3, survivors, 2);
+    /* The other two thirds and the intermediate they were cut from are
+     * garbage the moment we return, and nothing collects them. See the note
+     * on rope_free_difference's removal in the commit that took it out:
+     * the pairwise walk it used was unsound for a set of dead roots. */
     return 1;
-}
-
-/* Both frontiers are bounded. A single edit's difference is a spine, so a
- * couple of hundred entries is generous; exceeding it means refusing to free
- * rather than risking a wrong answer. */
-#define FRONTIER_CAPACITY 2048
-
-typedef struct Frontier {
-    void    *nodes[FRONTIER_CAPACITY];
-    uint32_t count;
-} Frontier;
-
-/* requires: *frontier readable.
- * ensures:  the result is 1 when that node is in it. No memory is written.
- */
-static int frontier_holds(const Frontier *frontier, const void *node)
-{
-    uint32_t count;
-    uint32_t index;
-    const void *candidate;
-
-    count = frontier->count;
-    index = 0;
-    while (index < count) {
-        candidate = frontier->nodes[index];
-        if (candidate == node) {
-            return 1;
-        }
-        index = index + 1;
-    }
-    return 0;
-}
-
-/* Appending is idempotent. Two dead roots may share a subtree, and a node
- * reached twice must still be freed once.
- *
- * requires: *frontier writable.
- * ensures:  *frontier holds that node, and the result is 1; or it was full,
- *           *frontier is unchanged, and the result is 0.
- */
-static int frontier_append(Frontier *frontier, void *node)
-{
-    uint32_t count;
-    int      present;
-
-    present = frontier_holds(frontier, node);
-    if (present == 1) {
-        return 1;
-    }
-    count = frontier->count;
-    if (count >= FRONTIER_CAPACITY) {
-        return 0;
-    }
-    frontier->nodes[count] = node;
-    frontier->count = count + 1;
-    return 1;
-}
-
-/* requires: node_pool(pool, live, residual); holds the full share of the
- *           subtree root at `node`, which sits at `height`.
- * ensures:  that one node is returned to the pool. Its children are not
- *           touched; the caller has already collected them.
- */
-static void free_one(Pool *pool, void *node, uint32_t height)
-{
-    if (height == 0) {
-        pool_free(pool, node, ROPE_LEAF_BYTES);
-        return;
-    }
-    pool_free(pool, node, sizeof(RopeNode));
-}
-
-/* requires: holds a read share of the subtree at `node`, at `height` > 0;
- *           *frontier writable.
- * ensures:  every child of that node is appended and the result is 1; or the
- *           frontier filled up and the result is 0.
- */
-static int push_children(const void *node, uint32_t height,
-                         Frontier *frontier)
-{
-    const RopeNode *source;
-    uint32_t        count;
-    uint32_t        index;
-    void           *child;
-    int             ok;
-
-    if (height == 0) {
-        return 1;
-    }
-
-    source = node;
-    count = source->child_count;
-    index = 0;
-    while (index < count) {
-        child = source->children[index];
-        ok = frontier_append(frontier, child);
-        if (ok == 0) {
-            return 0;
-        }
-        index = index + 1;
-    }
-    return 1;
-}
-
-/* requires: as rope.h.
- * ensures:  as rope.h.
- */
-int rope_free_difference(Pool *pool,
-                         const Rope *dead_set, uint32_t dead_count,
-                         const Rope *live_set, uint32_t live_count)
-{
-    Frontier dead;
-    Frontier live;
-    Frontier dead_next;
-    Frontier live_next;
-    void    *root;
-    void    *node;
-    uint32_t height;
-    uint32_t candidate;
-    uint32_t index;
-    uint32_t count;
-    int      ok;
-    int      shared;
-
-    /* Start above every root, so each is seeded when the descent reaches
-     * its own height. */
-    height = 0;
-    index = 0;
-    while (index < dead_count) {
-        root = dead_set[index].root;
-        if (root != NULL) {
-            candidate = dead_set[index].height;
-            if (candidate > height) {
-                height = candidate;
-            }
-        }
-        index = index + 1;
-    }
-    index = 0;
-    while (index < live_count) {
-        root = live_set[index].root;
-        if (root != NULL) {
-            candidate = live_set[index].height;
-            if (candidate > height) {
-                height = candidate;
-            }
-        }
-        index = index + 1;
-    }
-
-    dead.count = 0;
-    live.count = 0;
-
-    while (1) {
-        index = 0;
-        while (index < dead_count) {
-            root = dead_set[index].root;
-            if (root != NULL) {
-                candidate = dead_set[index].height;
-                if (candidate == height) {
-                    ok = frontier_append(&dead, root);
-                    if (ok == 0) {
-                        return 0;
-                    }
-                }
-            }
-            index = index + 1;
-        }
-        index = 0;
-        while (index < live_count) {
-            root = live_set[index].root;
-            if (root != NULL) {
-                candidate = live_set[index].height;
-                if (candidate == height) {
-                    ok = frontier_append(&live, root);
-                    if (ok == 0) {
-                        return 0;
-                    }
-                }
-            }
-            index = index + 1;
-        }
-
-        dead_next.count = 0;
-        live_next.count = 0;
-
-        /* A node both sides reach is shared: prune it from both and do not
-         * descend, because everything beneath it is shared too. */
-        count = live.count;
-        index = 0;
-        while (index < count) {
-            node = live.nodes[index];
-            shared = frontier_holds(&dead, node);
-            if (shared == 0) {
-                ok = push_children(node, height, &live_next);
-                if (ok == 0) {
-                    return 0;
-                }
-            }
-            index = index + 1;
-        }
-
-        count = dead.count;
-        index = 0;
-        while (index < count) {
-            node = dead.nodes[index];
-            shared = frontier_holds(&live, node);
-            if (shared == 0) {
-                ok = push_children(node, height, &dead_next);
-                if (ok == 0) {
-                    return 0;
-                }
-                free_one(pool, node, height);
-            }
-            index = index + 1;
-        }
-
-        if (height == 0) {
-            return 1;
-        }
-
-        memcpy(&dead, &dead_next, sizeof(Frontier));
-        memcpy(&live, &live_next, sizeof(Frontier));
-        height = height - 1;
-    }
 }
 
 /* The pool rounds every allocation up to its alignment, so a measurement

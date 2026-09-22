@@ -8,10 +8,25 @@
 #define PATTERN_CAPACITY  1024
 #define OUTPUT_WINDOW     4096
 
+/* Passed to adopt as `start` when the buffer was replaced wholesale and the
+ * index cannot be derived from the old one. */
+#define REBUILD_INDEX     SIZE_MAX
+
 /* Returned by the parsing helpers when the text did not fit or was
  * malformed, and used as the open end of a `N,$` line range. */
 #define PARSE_FAILED     SIZE_MAX
 #define LINE_RANGE_OPEN  SIZE_MAX
+
+/* Defined below. Works out the region an edit touched and hands it to
+ * adopt, so the line index can be carried forward rather than rebuilt.
+ *
+ * requires: editor(editor); rope(edited, bytes2, share);
+ *           decomposition(foci, spans, bytes) against the version `edited`
+ *           came from.
+ * ensures:  editor(editor) advanced to that version with its index updated.
+ */
+static void adopt_edit(Editor *editor, const Rope *edited,
+                       const Decomposition *foci);
 
 /* Defined below, beside the rest of the job machinery.
  *
@@ -384,10 +399,11 @@ static int resolve(const Editor *editor, Command *command,
     if (kind == ADDRESS_LINE_RANGE) {
         if (last == LINE_RANGE_OPEN) {
             total = editor->text.byte_count;
-            newlines = editor->text.newline_count;
+            newlines = line_index_newline_count(&editor->index);
             line_total = newlines;
             if (total > 0) {
-                ok = rope_line_start(&editor->text, newlines, &begin_slot);
+                ok = line_index_line_start(&editor->index, &editor->text,
+                                           newlines, &begin_slot);
                 if (ok == 1) {
                     begin = begin_slot;
                     if (begin < total) {
@@ -400,7 +416,8 @@ static int resolve(const Editor *editor, Command *command,
     }
 
     current = editor->current_line;
-    ok = address_resolve(&editor->text, &command->address, current,
+    ok = address_resolve(&editor->text, &editor->index, &command->address,
+                         current,
                          decomposition);
     return ok;
 }
@@ -441,7 +458,8 @@ static void print_foci(const Editor *editor,
 
         line = 0;
         if (numbered == 1) {
-            ok = rope_line_of_offset(&editor->text, start, &line_slot);
+            ok = line_index_line_of_offset(&editor->index, &editor->text,
+                                           start, &line_slot);
             if (ok == 1) {
                 line = line_slot;
             }
@@ -518,7 +536,8 @@ static void print_extents(const Editor *editor,
         start = decomposition->focus[index].start;
         end = decomposition->focus[index].end;
         line = 0;
-        ok = rope_line_of_offset(&editor->text, start, &line_slot);
+        ok = line_index_line_of_offset(&editor->index, &editor->text,
+                                       start, &line_slot);
         if (ok == 1) {
             line = line_slot;
         }
@@ -598,9 +617,26 @@ static int compose_matches(const Editor *editor, const Decomposition *outer,
  * ensures:  editor(editor) whose buffer is now that rope, marked modified,
  *           with current_line clamped into it.
  */
-static void adopt(Editor *editor, const Rope *replacement)
+/* Take a new version as the current buffer, and carry the line index
+ * forward with it.
+ *
+ * [start, end) is the region of the OLD buffer the edit touched, and the
+ * whole length change falls inside it, so everything outside is unchanged
+ * and the index only has to be told about that one region. Passing
+ * REBUILD_INDEX as `start` says the buffer was replaced wholesale and
+ * the index must be built from scratch.
+ *
+ * requires: editor(editor); rope(replacement, bytes, share).
+ * ensures:  editor(editor) whose buffer is that rope, whose index describes
+ *           it, marked modified, with current_line clamped into it and the
+ *           version recorded in the history.
+ */
+static void adopt(Editor *editor, const Rope *replacement, size_t start,
+                  size_t end, size_t inserted)
 {
+    LineIndex derived;
     uint32_t serial;
+    int      built;
     size_t   total;
     size_t   newlines;
     size_t   lines;
@@ -609,7 +645,26 @@ static void adopt(Editor *editor, const Rope *replacement)
     size_t   begin_slot;
     int      ok;
 
+    /* Derive the new index BEFORE the rope is swapped in, because the
+     * update reads the old index and the new rope. */
+    line_index_initialize(&derived);
+    if (start == REBUILD_INDEX) {
+        built = line_index_build(&editor->pool, replacement, &derived);
+    } else {
+        built = line_index_update(&editor->pool, &editor->index, replacement,
+                                  start, end, inserted, &derived);
+    }
+    if (built == 0) {
+        /* Out of memory for the index. Rebuilding is the only honest
+         * fallback, and if that fails too the buffer is left alone. */
+        built = line_index_build(&editor->pool, replacement, &derived);
+        if (built == 0) {
+            return;
+        }
+    }
+
     memcpy(&editor->text, replacement, sizeof(Rope));
+    memcpy(&editor->index, &derived, sizeof(LineIndex));
     editor->modified = 1;
 
     /* Every version gets a number, which is how a job that lands late can
@@ -622,10 +677,11 @@ static void adopt(Editor *editor, const Rope *replacement)
     history_push(&editor->history, &editor->pool, replacement);
 
     total = editor->text.byte_count;
-    newlines = editor->text.newline_count;
+    newlines = line_index_newline_count(&editor->index);
     lines = newlines;
     if (total > 0) {
-        ok = rope_line_start(&editor->text, newlines, &begin_slot);
+        ok = line_index_line_start(&editor->index, &editor->text, newlines,
+                                   &begin_slot);
         if (ok == 1) {
             begin = begin_slot;
             if (begin < total) {
@@ -737,7 +793,7 @@ int editor_load(Editor *editor, const char *path)
     editor->current_line = 0;
     snprintf(editor->name, NAME_CAPACITY, "%s", path);
 
-    adopt(editor, &loaded);
+    adopt(editor, &loaded, REBUILD_INDEX, 0, 0);
     editor->modified = 0;
     return 1;
 }
@@ -756,6 +812,8 @@ int editor_initialize(Editor *editor)
     }
     history_initialize(&editor->history);
     rope_initialize_empty(&editor->text);
+    line_index_initialize(&editor->index);
+    line_index_initialize(&editor->index);
     editor->loop = NULL;
     editor->structure = NULL;
     editor->current = 0;
@@ -763,6 +821,9 @@ int editor_initialize(Editor *editor)
     while (index < BUFFER_CAPACITY) {
         editor->slots[index].used = 0;
         rope_initialize_empty(&editor->slots[index].text);
+        line_index_initialize(&editor->slots[index].index);
+        line_index_initialize(&editor->slots[index].index);
+        line_index_initialize(&editor->slots[index].index);
         history_initialize(&editor->slots[index].history);
         editor->slots[index].name[0] = 0x00;
         index = index + 1;
@@ -1046,7 +1107,7 @@ int editor_execute(Editor *editor, const char *line)
             write_line("?  out of memory");
             return 0;
         }
-        adopt(editor, &edited);
+        adopt_edit(editor, &edited, &foci);
         return 1;
     }
 
@@ -1066,7 +1127,7 @@ int editor_execute(Editor *editor, const char *line)
             write_line("?  out of memory");
             return 0;
         }
-        adopt(editor, &edited);
+        adopt_edit(editor, &edited, &foci);
         return 1;
     }
 
@@ -1093,7 +1154,7 @@ int editor_execute(Editor *editor, const char *line)
             write_line("?  out of memory");
             return 0;
         }
-        adopt(editor, &edited);
+        adopt_edit(editor, &edited, &foci);
         return 1;
     }
 
@@ -1138,7 +1199,7 @@ int editor_execute(Editor *editor, const char *line)
             write_line("?  out of memory");
             return 0;
         }
-        adopt(editor, &edited);
+        adopt_edit(editor, &edited, &foci);
         return 1;
     }
 
@@ -1375,7 +1436,7 @@ int editor_complete(Editor *editor, uint64_t token, int32_t result)
 
     snprintf(editor->name, NAME_CAPACITY, "%s", editor->jobs[slot].path);
     editor->current_line = 0;
-    adopt(editor, &loaded);
+    adopt(editor, &loaded, REBUILD_INDEX, 0, 0);
     editor->modified = 0;
 
     snprintf(label, sizeof(label), "[%u] %s loaded, %u bytes\n", identifier,
@@ -1432,6 +1493,8 @@ static void save_current_buffer(Editor *editor)
 
     index = editor->current;
     memcpy(&editor->slots[index].text, &editor->text, sizeof(Rope));
+    memcpy(&editor->slots[index].index, &editor->index, sizeof(LineIndex));
+    memcpy(&editor->slots[index].index, &editor->index, sizeof(LineIndex));
     memcpy(&editor->slots[index].history, &editor->history, sizeof(History));
 
     /* One dereference per statement: a field-to-field copy is a load and a
@@ -1460,6 +1523,7 @@ static void load_buffer(Editor *editor, size_t index)
     used = editor->slots[index].used;
     if (used == 0) {
         rope_initialize_empty(&editor->slots[index].text);
+        line_index_initialize(&editor->slots[index].index);
         history_initialize(&editor->slots[index].history);
         editor->slots[index].current_line = 0;
         editor->slots[index].serial = 0;
@@ -1469,6 +1533,8 @@ static void load_buffer(Editor *editor, size_t index)
     }
 
     memcpy(&editor->text, &editor->slots[index].text, sizeof(Rope));
+    memcpy(&editor->index, &editor->slots[index].index, sizeof(LineIndex));
+    memcpy(&editor->index, &editor->slots[index].index, sizeof(LineIndex));
     memcpy(&editor->history, &editor->slots[index].history, sizeof(History));
 
     line_number = editor->slots[index].current_line;
@@ -1529,7 +1595,7 @@ void editor_report_buffers(Editor *editor)
                 mark = '*';
             }
             length = editor->slots[index].text.byte_count;
-            lines = editor->slots[index].text.newline_count;
+            lines = line_index_newline_count(&editor->slots[index].index);
             modified = editor->slots[index].modified;
             snprintf(label, sizeof(label), "%c%u\t%u bytes, %u lines%s\t%s\n",
                      mark, index, length, lines,
@@ -1623,4 +1689,48 @@ int editor_list_definitions(Editor *editor)
         write_line("no definitions found");
     }
     return 1;
+}
+
+/* Adopt an edited version, working out the region the edit touched.
+ *
+ * Every focus lies inside [first start, last end), and nothing outside that
+ * region moved, so the whole length change falls within it. That is all the
+ * index needs: one region, its old extent and its new one.
+ *
+ * requires: editor(editor); rope(edited, bytes', share);
+ *           decomposition(foci, spans, bytes) resolved against the buffer
+ *           `edited` was derived from, with at least one focus.
+ * ensures:  editor(editor) advanced to that version, its index carried
+ *           forward.
+ */
+static void adopt_edit(Editor *editor, const Rope *edited,
+                       const Decomposition *foci)
+{
+    size_t count;
+    size_t start;
+    size_t end;
+    size_t old_total;
+    size_t new_total;
+    size_t region;
+
+    count = foci->count;
+    if (count == 0) {
+        adopt(editor, edited, REBUILD_INDEX, 0, 0);
+        return;
+    }
+
+    start = foci->focus[0].start;
+    end = foci->focus[count - 1].end;
+
+    old_total = rope_byte_count(&editor->text);
+    new_total = rope_byte_count(edited);
+
+    region = end - start;
+    if (new_total >= old_total) {
+        region = region + (new_total - old_total);
+    } else {
+        region = region - (old_total - new_total);
+    }
+
+    adopt(editor, edited, start, end, region);
 }

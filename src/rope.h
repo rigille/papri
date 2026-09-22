@@ -11,9 +11,14 @@
  * Leaves are exactly ROPE_LEAF_BYTES of payload, aligned to that same
  * boundary, so a leaf occupies one cache line and never straddles two. They
  * are headerless — no length, no measures, no tag — which is what makes
- * "exactly one line" exact. A child's byte and newline counts live in its
+ * A child's byte count lives in its
  * parent's size table, which a relaxed tree needs regardless. Size tables are
  * kept even on regular nodes so a leaf never has to know its own length.
+ *
+ * The rope counts bytes and nothing else. It does not know what a newline
+ * is; line addressing lives in src/line_index.h, one layer up, which is
+ * what keeps this a plain RRB in immer's shape rather than a bespoke
+ * measured tree.
  *
  * Nodes are sealed on construction and never written again. That immutability
  * is what lets two versions hold read shares of one node, which is what makes
@@ -55,7 +60,6 @@ typedef struct Rope {
     void    *root;          /* RopeNode* above height 0, leaf bytes at 0 */
     uint32_t height;        /* 0 when the root is a single leaf or empty */
     size_t   byte_count;
-    size_t   newline_count;
 } Rope;
 
 /* requires: *rope is allocated and writable.
@@ -77,12 +81,6 @@ int rope_from_bytes(Pool *pool, const unsigned char *bytes, size_t length,
  *           memory is written.
  */
 size_t rope_byte_count(const Rope *rope);
-
-/* requires: rope(rope, bytes, share).
- * ensures:  rope(rope, bytes, share); the result is the number of newlines in
- *           bytes. No memory is written.
- */
-size_t rope_newline_count(const Rope *rope);
 
 /* requires: rope(rope, bytes, share); *value is writable.
  * ensures:  rope(rope, bytes, share). When offset is within bytes, *value is
@@ -148,61 +146,6 @@ int rope_replace_span(Pool *pool, const Rope *rope,
                       const unsigned char *replacement,
                       size_t replacement_length,
                       Rope *result);
-
-/* requires: rope(rope, bytes, share); *offset is writable.
- * ensures:  rope(rope, bytes, share). Lines are numbered from 0 and a line
- *           begins just after the preceding newline. When line_index names a
- *           line that begins within bytes, *offset is where it begins and the
- *           result is 1; otherwise *offset is unchanged and the result is 0.
- */
-int rope_line_start(const Rope *rope, size_t line_index, size_t *offset);
-
-/* requires: rope(rope, bytes, share); *line_index is writable.
- * ensures:  rope(rope, bytes, share). When offset is at most |bytes|,
- *           *line_index is the number of newlines strictly before it — the
- *           line the offset falls on — and the result is 1; otherwise
- *           *line_index is unchanged and the result is 0.
- */
-int rope_line_of_offset(const Rope *rope, size_t offset,
-                        size_t *line_index);
-
-/* Free exactly the nodes the retiring version holds and the survivor does
- * not — the runtime half of the reclamation story.
- *
- * Shares say WHEN freeing is permitted: a node may go back only once every
- * share of it has rejoined to the full share. They are ghost state, so they
- * cannot say WHICH nodes those are. This walk is what finds them, and the
- * obligation connecting the two is that it returns exactly the nodes whose
- * shares have rejoined.
- *
- * It descends both versions by height, pruning wherever a node is reached by
- * both — pointer identity, so a shared subtree costs one comparison however
- * large it is. Positions are not compared, because drop and concat shift a
- * shared child to a different index; only identity at a common height is
- * trusted.
- *
- * Soundness rests on each version being a TREE — no node twice within one
- * version — so that every node is reached, and freed, at most once.
- *
- * Both sides are SETS of roots, not single versions. Retirement passes one
- * of each; an edit passes its discarded intermediates as dead and the
- * version it started from plus the one it produced as live, which is how
- * the garbage a single edit leaves behind gets collected at all — that
- * garbage is reachable from no version, so version-to-version diffing alone
- * would never see it.
- *
- * requires: node_pool(pool, live, residual); every rope in `dead` is one
- *           nothing outside this call still holds a share of; every rope in
- *           `live` must survive.
- * ensures:  node_pool(pool, live', residual) with every node reachable from
- *           some rope in `dead` and from none in `live` returned to the
- *           pool, each freed exactly once, and the result is 1; or the
- *           difference was too wide to walk within bounded memory and the
- *           result is 0. Every rope in `live` is untouched and readable.
- */
-int rope_free_difference(Pool *pool,
-                         const Rope *dead, uint32_t dead_count,
-                         const Rope *live, uint32_t live_count);
 
 /* requires: rope(rope, bytes, share).
  * ensures:  rope(rope, bytes, share); the result is the total pool memory

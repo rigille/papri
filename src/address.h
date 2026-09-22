@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 
+#include "line_index.h"
 #include "rope.h"
 
 /* Addresses, as defunctionalized optics.
@@ -67,6 +68,9 @@ typedef struct Decomposition {
  *   *address is a pure value naming `form`. When the form carries a pattern,
  *   holds a read share of its bytes, which must outlive the address.
  *
+ * Line addressing goes through the index rather than the rope: the rope is
+ * a plain RRB over bytes and does not know what a newline is.
+ *
  * decomposition(decomposition, spans, bytes)
  *   *decomposition is a pure value: `spans` is a sequence of byte ranges of
  *   `bytes`, pairwise disjoint, in ascending order, none extending past
@@ -82,8 +86,9 @@ typedef struct Decomposition {
  *           outside the buffer, or selected more than
  *           DECOMPOSITION_CAPACITY foci, and the outcome is 0.
  */
-int address_resolve(const Rope *rope, const Address *address,
-                    size_t current_line, Decomposition *result);
+int address_resolve(const Rope *rope, const LineIndex *index,
+                    const Address *address, size_t current_line,
+                    Decomposition *result);
 
 /* requires: rope(rope, bytes, share); holds a read share of
  *           `pattern_length` bytes at `pattern`, which is non-empty;

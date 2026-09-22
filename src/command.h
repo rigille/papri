@@ -3,6 +3,7 @@
 
 #include "address.h"
 #include "history.h"
+#include "line_index.h"
 #include "io.h"
 #include "pool.h"
 #include "rope.h"
@@ -33,8 +34,9 @@
  * back, so every command below keeps working on `editor->text` without
  * knowing that several buffers exist. */
 typedef struct BufferSlot {
-    Rope     text;
-    History  history;
+    Rope      text;
+    LineIndex index;
+    History   history;
     size_t   current_line;
     uint32_t serial;
     int      modified;
@@ -65,8 +67,9 @@ typedef struct Editor {
     Pool       pool;          /* shared by every buffer */
     BufferSlot slots[BUFFER_CAPACITY];
     size_t     current;
-    History  history;
-    Rope     text;
+    History   history;
+    Rope      text;
+    LineIndex index;      /* line addressing for `text`; see line_index.h */
     IoLoop    *loop;
     Structure *structure;      /* the grammar, loaded on first use */
     Job      jobs[JOB_CAPACITY];

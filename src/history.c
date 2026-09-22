@@ -118,15 +118,11 @@ int history_unpin(History *history, uint32_t index)
  */
 int history_retire_oldest(History *history, Pool *pool)
 {
-    Rope     retiring;
-    Rope     survivor;
     uint32_t total;
     uint32_t first;
     uint32_t slot;
     uint32_t next_slot;
     uint32_t pins;
-    uint32_t leaked;
-    int      ok;
 
     total = history->count;
     if (total < 2) {
@@ -145,17 +141,11 @@ int history_retire_oldest(History *history, Pool *pool)
     }
 
     next_slot = slot_of(first, 1);
-    memcpy(&retiring, &history->versions[slot].text, sizeof(Rope));
-    memcpy(&survivor, &history->versions[next_slot].text, sizeof(Rope));
 
-    ok = rope_free_difference(pool, &retiring, 1, &survivor, 1);
-    if (ok == 0) {
-        /* The difference was too wide to walk within bounded memory.
-         * Leaking is the safe answer; freeing a guess is not. The version
-         * still leaves the history, because nothing can reach it now. */
-        leaked = history->leaked;
-        history->leaked = leaked + 1;
-    }
+    /* The version leaves the history, but its nodes are not reclaimed:
+     * nothing collects them yet. The walk that used to do it was removed
+     * as unsound; see the commit that took it out. */
+    (void)pool;
 
     rope_initialize_empty(&history->versions[slot].text);
     history->versions[slot].pins = 0;

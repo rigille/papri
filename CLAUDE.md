@@ -226,6 +226,27 @@ Three consequences worth stating, because they are what the design rests on:
   overflow hazard, but arbitrary lattice elements mean share arithmetic in every
   proof.
 
+### The shortcut that does not work
+
+The first implementation walked a retiring version against its successor and
+freed the difference, pruning wherever a node was reached by both sides. That
+is sound for ONE dead root against one survivor, because a version is a tree
+and there is only one path to any node.
+
+It is NOT sound for a SET of dead roots, and an edit produces a set — every
+intermediate rope a splice discards. Two dead roots can reach one shared
+subtree by different paths. The first prunes it, and pruning stops the walk
+from recording the subtree's interior as live; the second then reaches a node
+inside it by another route, finds it absent from the live frontier, and frees
+it while it is still reachable. Buffers over about ten kilobytes came back
+corrupted.
+
+Expanding the live side fully restores soundness and costs a walk of every
+surviving node per edit, which is the thing the design existed to avoid. So
+the walk was removed and papri leaks until the collector is wired in. If you
+are tempted to reintroduce a pairwise diff, the question to answer first is
+how it records liveness for a subtree it pruned.
+
 ## Build
 
 Nix flake for the toolchain (`nix develop`), plain `make` inside it.
