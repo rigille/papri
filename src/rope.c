@@ -41,6 +41,21 @@ typedef struct NodePair {
     uint32_t height;
 } NodePair;
 
+/* The RRB rebalance invariant, from immer, which takes it from the Bagwell
+ * and Rompf paper. After a concatenation the merged children are
+ * redistributed until their number is within RRB_EXTRAS of the minimum that
+ * could hold them, skipping any node already at least RRB_INVARIANT short of
+ * full.
+ *
+ * This is the "Balanced" in Relaxed Radix Balanced, and without it the other
+ * two letters do not work either: nothing bounds how far a node can drift
+ * from the radix layout, so nothing bounds how far the radix guess in
+ * child_for_offset can be wrong, and repeated concatenation of small pieces
+ * leaves ever thinner nodes with nothing to repair them.
+ */
+#define RRB_EXTRAS    2
+#define RRB_INVARIANT 1
+
 /* Recursive helpers return 1 when they produced a node, 0 when the result is
  * empty, and -1 when allocation failed. Distinguishing the last two matters:
  * an empty result is ordinary, a failure must propagate. */
@@ -171,6 +186,315 @@ static RopeNode *make_node(Pool *pool, uint32_t height,
     return node;
 }
 
+
+/* Defined below, beside the rest of the child-list helpers.
+ *
+ * requires: *list writable; list->count < CHILD_LIST_CAPACITY; holds a read
+ *           share of `node`.
+ * ensures:  *list has that child appended.
+ */
+static void child_list_append(ChildList *list, void *node, size_t bytes,
+                              size_t newlines);
+
+/* requires: rope_node(node, contents, share) at `height` above 0; offset is
+ *           within its byte count.
+ * ensures:  rope_node(node, contents, share); the result is the index of the
+ *           child holding that offset. No memory is written.
+ *
+ * The descent immer uses. A full child of a node at `height` covers
+ * 2^child_shift bytes, so no child can hold more than that, so the radix
+ * quotient is a lower bound on the answer and the scan only ever moves
+ * forward from it. On a tree that has not been relaxed the guess is exact;
+ * the rebalance invariant is what keeps it close otherwise.
+ */
+static uint32_t child_for_offset(const RopeNode *node, uint32_t height,
+                                 size_t offset)
+{
+    uint32_t child_shift;
+    uint32_t index;
+    uint32_t child_count;
+    size_t   boundary;
+
+    child_shift = ROPE_LEAF_BITS + ROPE_BRANCH_BITS * (height - 1);
+    child_count = node->child_count;
+
+    index = (uint32_t)(offset >> child_shift);
+    if (index >= child_count) {
+        index = child_count - 1;
+    }
+
+    boundary = node->cumulative_bytes[index];
+    while (boundary <= offset) {
+        index = index + 1;
+        if (index >= child_count) {
+            return child_count - 1;
+        }
+        boundary = node->cumulative_bytes[index];
+    }
+    return index;
+}
+
+/* requires: holds a read share of the node at `node`, at `height`, whose
+ *           byte count is `node_bytes`.
+ * ensures:  the read share is returned; the result is how many slots it
+ *           holds — bytes for a leaf, children for anything above.
+ */
+static uint32_t node_slot_count(const void *node, uint32_t height,
+                                size_t node_bytes)
+{
+    const RopeNode *source;
+    uint32_t        total;
+
+    if (height == 0) {
+        return (uint32_t)node_bytes;
+    }
+    source = node;
+    total = source->child_count;
+    return total;
+}
+
+/* Work out how the slots should be spread, without moving anything yet.
+ *
+ * requires: `counts` holds `count` slot counts summing to `total`; *planned
+ *           is writable and at least as long.
+ * ensures:  *planned holds the new spread and the result is how many nodes
+ *           it needs, which is within RRB_EXTRAS of the minimum; or the
+ *           spread is already good enough and the result is `count`.
+ */
+static uint32_t plan_rebalance(const uint32_t *counts, uint32_t count,
+                               uint32_t branches, uint32_t *planned)
+{
+    uint32_t total;
+    uint32_t optimal;
+    uint32_t remaining;
+    uint32_t following;
+    uint32_t taken;
+    uint32_t index;
+    uint32_t position;
+    uint32_t live;
+    uint32_t threshold;
+    uint32_t slots;
+
+    total = 0;
+    index = 0;
+    while (index < count) {
+        slots = counts[index];
+        total = total + slots;
+        planned[index] = slots;
+        index = index + 1;
+    }
+
+    if (total == 0) {
+        return count;
+    }
+    optimal = (total + branches - 1) / branches;
+    live = count;
+    threshold = optimal + RRB_EXTRAS;
+    if (live < threshold) {
+        return count;
+    }
+
+    threshold = branches - RRB_INVARIANT;
+    position = 0;
+    live = count;
+    while (live >= optimal + RRB_EXTRAS) {
+        /* Skip the nodes that are already full enough to leave alone. */
+        taken = planned[position];
+        while (taken > threshold) {
+            position = position + 1;
+            taken = planned[position];
+        }
+
+        /* Pour this short node into the ones after it. */
+        remaining = planned[position];
+        while (remaining > 0) {
+            following = planned[position + 1];
+            taken = remaining + following;
+            if (taken > branches) {
+                taken = branches;
+            }
+            planned[position] = taken;
+            remaining = remaining + following - taken;
+            position = position + 1;
+        }
+
+        /* It has been emptied into its neighbours; drop it. */
+        index = position;
+        while (index + 1 < live) {
+            slots = planned[index + 1];
+            planned[index] = slots;
+            index = index + 1;
+        }
+        live = live - 1;
+        position = position - 1;
+    }
+    return live;
+}
+
+/* Move the slots to match the plan.
+ *
+ * requires: node_pool(pool, live, residual); *list holds nodes at `height`;
+ *           `planned` holds `live_count` slot counts summing to the slots
+ *           the list already holds.
+ * ensures:  node_pool(pool, live', residual); *list holds `live_count` fresh
+ *           nodes at `height` denoting the same sequence, and the result is
+ *           PRODUCED; or FAILED.
+ */
+static int apply_rebalance(Pool *pool, uint32_t height, ChildList *list,
+                           const uint32_t *planned, uint32_t live_count)
+{
+    ChildList       rebuilt;
+    void           *gathered_nodes[ROPE_BRANCHING];
+    size_t          gathered_bytes[ROPE_BRANCHING];
+    size_t          gathered_newlines[ROPE_BRANCHING];
+    const RopeNode *source_node;
+    const unsigned char *source_leaf;
+    unsigned char  *leaf;
+    RopeNode       *built;
+    uint32_t        source_index;
+    uint32_t        slot_offset;
+    uint32_t        produced;
+    uint32_t        want;
+    uint32_t        filled;
+    uint32_t        available;
+    uint32_t        portion;
+    uint32_t        step;
+    uint32_t        child_total;
+    size_t          source_bytes;
+    size_t          own_bytes;
+    size_t          own_newlines;
+    size_t          built_bytes;
+    size_t          built_newlines;
+    size_t          total_bytes;
+    size_t          total_newlines;
+    size_t          newlines;
+    void           *child;
+
+    rebuilt.count = 0;
+    source_index = 0;
+    slot_offset = 0;
+
+    produced = 0;
+    while (produced < live_count) {
+        want = planned[produced];
+
+        if (height == 0) {
+            leaf = allocate_leaf(pool);
+            if (leaf == NULL) {
+                return FAILED;
+            }
+            filled = 0;
+            while (filled < want) {
+                source_bytes = list->bytes[source_index];
+                available = (uint32_t)source_bytes - slot_offset;
+                portion = want - filled;
+                if (portion > available) {
+                    portion = available;
+                }
+                source_leaf = list->nodes[source_index];
+                memcpy(leaf + filled, source_leaf + slot_offset, portion);
+                filled = filled + portion;
+                slot_offset = slot_offset + portion;
+                if (slot_offset == source_bytes) {
+                    source_index = source_index + 1;
+                    slot_offset = 0;
+                }
+            }
+            newlines = count_newlines(leaf, want);
+            child_list_append(&rebuilt, leaf, want, newlines);
+        } else {
+            filled = 0;
+            while (filled < want) {
+                source_node = list->nodes[source_index];
+                child_total = source_node->child_count;
+                available = child_total - slot_offset;
+                portion = want - filled;
+                if (portion > available) {
+                    portion = available;
+                }
+                step = 0;
+                while (step < portion) {
+                    child = source_node->children[slot_offset + step];
+                    gathered_nodes[filled + step] = child;
+                    own_bytes = node_child_bytes(source_node,
+                                                slot_offset + step);
+                    own_newlines = node_child_newlines(source_node,
+                                                       slot_offset + step);
+                    gathered_bytes[filled + step] = own_bytes;
+                    gathered_newlines[filled + step] = own_newlines;
+                    step = step + 1;
+                }
+                filled = filled + portion;
+                slot_offset = slot_offset + portion;
+                if (slot_offset == child_total) {
+                    source_index = source_index + 1;
+                    slot_offset = 0;
+                }
+            }
+            built = make_node(pool, height, gathered_nodes, gathered_bytes,
+                              gathered_newlines, want, &total_bytes,
+                              &total_newlines);
+            if (built == NULL) {
+                return FAILED;
+            }
+            built_bytes = total_bytes;
+            built_newlines = total_newlines;
+            child_list_append(&rebuilt, built, built_bytes, built_newlines);
+        }
+
+        produced = produced + 1;
+    }
+
+    memcpy(list, &rebuilt, sizeof(ChildList));
+    return PRODUCED;
+}
+
+/* requires: node_pool(pool, live, residual); *list holds nodes at `height`.
+ * ensures:  node_pool(pool, live', residual); *list denotes the same
+ *           sequence with its nodes' count within RRB_EXTRAS of the minimum
+ *           that could hold them, and the result is PRODUCED; or FAILED.
+ *           When the list is already good enough it is left alone, which is
+ *           the common case and costs one pass over the counts.
+ */
+static int rebalance(Pool *pool, uint32_t height, ChildList *list)
+{
+    uint32_t counts[CHILD_LIST_CAPACITY];
+    uint32_t planned[CHILD_LIST_CAPACITY];
+    uint32_t branches;
+    uint32_t count;
+    uint32_t live_count;
+    uint32_t index;
+    size_t   own_bytes;
+    void    *node;
+    int      outcome;
+
+    count = list->count;
+    if (count < 2) {
+        return PRODUCED;
+    }
+
+    branches = ROPE_BRANCHING;
+    if (height == 0) {
+        branches = ROPE_LEAF_BYTES;
+    }
+
+    index = 0;
+    while (index < count) {
+        node = list->nodes[index];
+        own_bytes = list->bytes[index];
+        counts[index] = node_slot_count(node, height, own_bytes);
+        index = index + 1;
+    }
+
+    live_count = plan_rebalance(counts, count, branches, planned);
+    if (live_count == count) {
+        return PRODUCED;
+    }
+
+    outcome = apply_rebalance(pool, height, list, planned, live_count);
+    return outcome;
+}
+
 /* requires: node_pool(pool, live, residual); holds read shares of list's
  *           children; 0 < list->count <= CHILD_LIST_CAPACITY; *result
  *           writable.
@@ -179,9 +503,10 @@ static RopeNode *make_node(Pool *pool, uint32_t height,
  *           they do not, all at `height`, and the outcome is PRODUCED; or
  *           FAILED.
  */
-static int pack_children(Pool *pool, uint32_t height, const ChildList *list,
+static int pack_children(Pool *pool, uint32_t height, ChildList *list,
                          NodePair *result)
 {
+    int              rebalanced;
     uint32_t         count;
     uint32_t         left_count;
     uint32_t         right_count;
@@ -189,6 +514,14 @@ static int pack_children(Pool *pool, uint32_t height, const ChildList *list,
     void *const     *child_slice;
     const size_t    *bytes_slice;
     const size_t    *newlines_slice;
+
+    /* Redistribute before grouping: this is where the "Balanced" happens,
+     * and it is what keeps the radix guess in child_for_offset close to the
+     * answer. */
+    rebalanced = rebalance(pool, height - 1, list);
+    if (rebalanced == FAILED) {
+        return FAILED;
+    }
 
     count = list->count;
 
@@ -868,8 +1201,6 @@ static void byte_at_node(const void *node, uint32_t height, size_t offset,
     const RopeNode      *source;
     const unsigned char *leaf;
     uint32_t             index;
-    uint32_t             child_count;
-    size_t               boundary;
     size_t               previous;
     const void          *child;
 
@@ -881,19 +1212,13 @@ static void byte_at_node(const void *node, uint32_t height, size_t offset,
     }
 
     source = node;
-    child_count = source->child_count;
-    index = 0;
+    index = child_for_offset(source, height, offset);
     previous = 0;
-    while (index < child_count) {
-        boundary = source->cumulative_bytes[index];
-        if (offset < boundary) {
-            child = source->children[index];
-            byte_at_node(child, height - 1, offset - previous, value);
-            return;
-        }
-        previous = boundary;
-        index = index + 1;
+    if (index > 0) {
+        previous = source->cumulative_bytes[index - 1];
     }
+    child = source->children[index];
+    byte_at_node(child, height - 1, offset - previous, value);
 }
 
 /* requires: rope(rope, bytes, share); *value writable.
@@ -1865,4 +2190,86 @@ size_t rope_allocated_bytes(const Rope *rope)
     height = rope->height;
     total = measure_node(root, height);
     return total;
+}
+
+/* requires: holds a read share of the subtree at `node`, at `height`.
+ * ensures:  the read share is returned; the result is 1 when this node and
+ *           every node beneath it satisfies the RRB balance invariant.
+ */
+static int check_fill_node(const void *node, uint32_t height)
+{
+    const RopeNode *source;
+    const RopeNode *inner;
+    const void     *child;
+    uint32_t        count;
+    uint32_t        index;
+    uint32_t        slots;
+    uint32_t        optimal;
+    uint32_t        branches;
+    uint32_t        threshold;
+    uint32_t        children_here;
+    size_t          own_bytes;
+    int             ok;
+
+    if (height == 0) {
+        return 1;
+    }
+
+    source = node;
+    count = source->child_count;
+
+    branches = ROPE_BRANCHING;
+    if (height == 1) {
+        branches = ROPE_LEAF_BYTES;
+    }
+
+    slots = 0;
+    index = 0;
+    while (index < count) {
+        if (height == 1) {
+            own_bytes = node_child_bytes(source, index);
+            slots = slots + (uint32_t)own_bytes;
+        } else {
+            child = source->children[index];
+            inner = child;
+            children_here = inner->child_count;
+            slots = slots + children_here;
+        }
+        index = index + 1;
+    }
+
+    optimal = (slots + branches - 1) / branches;
+    threshold = optimal + RRB_EXTRAS;
+    if (count >= threshold) {
+        return 0;
+    }
+
+    index = 0;
+    while (index < count) {
+        child = source->children[index];
+        ok = check_fill_node(child, height - 1);
+        if (ok == 0) {
+            return 0;
+        }
+        index = index + 1;
+    }
+    return 1;
+}
+
+/* requires: as rope.h.
+ * ensures:  as rope.h.
+ */
+int rope_check_fill(const Rope *rope)
+{
+    const void *root;
+    uint32_t    height;
+    int         ok;
+
+    root = rope->root;
+    if (root == NULL) {
+        return 1;
+    }
+    height = rope->height;
+    ok = check_fill_node(root, height);
+    return ok;
 }

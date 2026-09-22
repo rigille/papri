@@ -498,6 +498,78 @@ static void test_edits_share_structure(void)
     report("edits share structure with their source", before);
 }
 
+/* Repeated concatenation of small pieces is what degrades an RRB that does
+ * not rebalance: every concat leaves thin nodes and nothing ever repairs
+ * them, so the tree deepens and the descent lengthens. This is the test the
+ * rebalance exists for.
+ *
+ * requires: node_pool(pool, live, residual).
+ * ensures:  `failures` counts the ways the tree degraded.
+ */
+static void test_many_concats_stay_balanced(void)
+{
+    static uint8_t piece[200];
+    Rope           rope;
+    Rope           small;
+    Rope           joined;
+    size_t         step;
+    size_t         index;
+    size_t         length;
+    uint32_t       height;
+    int            before;
+    int            ok;
+
+    before = failures;
+
+    /* 200 bytes: two of them will not fit in one 256-byte leaf, so the
+     * leaf-merge in concat cannot tidy them up and each piece stays its own
+     * under-full leaf. That is exactly the drift the rebalance repairs. */
+    index = 0;
+    while (index < 200) {
+        piece[index] = (uint8_t)(0x61 + (index % 26));
+        index = index + 1;
+    }
+
+    rope_initialize_empty(&rope);
+    step = 0;
+    while (step < 300) {
+        ok = rope_from_bytes(&pool, piece, 200, &small);
+        if (ok == 0) {
+            failures = failures + 1;
+            printf("  FAIL  could not build piece %zu\n", step);
+            report("many concatenations stay balanced", before);
+            return;
+        }
+        ok = rope_concat(&pool, &rope, &small, &joined);
+        if (ok == 0) {
+            failures = failures + 1;
+            printf("  FAIL  concat %zu refused\n", step);
+            report("many concatenations stay balanced", before);
+            return;
+        }
+        memcpy(&rope, &joined, sizeof(Rope));
+        step = step + 1;
+    }
+
+    length = rope_byte_count(&rope);
+    expect(length == 60000, "the concatenated rope has every byte");
+
+    ok = rope_check_invariants(&rope);
+    expect(ok == 1, "it is structurally sound");
+
+    ok = rope_check_fill(&rope);
+    expect(ok == 1, "every node is within RRB_EXTRAS of optimal fill");
+
+    /* 20000 bytes at 256 per leaf is 79 leaves, which two levels of
+     * branching 32 hold comfortably. An unbalanced tree would be deeper. */
+    height = rope.height;
+    expect(height <= 2, "the tree did not deepen");
+    printf("  note  300 concatenations of 200 bytes gave height %u for %zu\n",
+           height, length);
+
+    report("many concatenations stay balanced", before);
+}
+
 /* requires: standard output is writable.
  * ensures:  every test above has run and reported; the result is 0 when
  *           `failures` is 0 and 1 otherwise.
@@ -519,6 +591,7 @@ int main(void)
     test_line_addressing();
     test_random_edits_track_the_model();
     test_edits_share_structure();
+    test_many_concats_stay_balanced();
 
     printf("  note  pool reserved %zu bytes for %zu handed out\n",
            pool_reserved(&pool), pool_handed_out(&pool));

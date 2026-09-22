@@ -21,6 +21,13 @@
  */
 
 #define ROPE_LEAF_BYTES 256
+
+/* The same two numbers as powers of two, for the radix descent: a full
+ * child of a node at height h covers 2^(ROPE_LEAF_BITS + ROPE_BRANCH_BITS *
+ * (h-1)) bytes, which is what makes `offset >> that` a valid lower bound on
+ * the child index. */
+#define ROPE_LEAF_BITS   8
+#define ROPE_BRANCH_BITS 5
 #define ROPE_BRANCHING  32
 #define ROPE_MAX_HEIGHT 16
 
@@ -203,6 +210,15 @@ int rope_free_difference(Pool *pool,
  *           memory is written.
  */
 size_t rope_allocated_bytes(const Rope *rope);
+
+/* requires: rope(rope, bytes, share).
+ * ensures:  rope(rope, bytes, share); the result is 1 when every interior
+ *           node holds its children within RRB_EXTRAS of the fewest that
+ *           could hold them — the RRB balance invariant. Nothing else
+ *           checks this, and without it a tree degrades silently under
+ *           repeated concatenation. For tests; no memory is written.
+ */
+int rope_check_fill(const Rope *rope);
 
 /* requires: rope(rope, bytes, share).
  * ensures:  rope(rope, bytes, share); the result is 1 when every structural
