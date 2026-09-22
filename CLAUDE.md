@@ -24,6 +24,29 @@ own, and are load-bearing here in a way they were not for `kelci`.
     `normal_impulse`, `time_step`, `frequency`, `buffer`, `length`
 - C macros follow the same rule but in `SCREAMING_SNAKE_CASE`.
 
+## Sizes are `size_t`
+
+Anything that counts **bytes** is `size_t`: a length, an offset, a capacity,
+a measure in a node's size table, a parameter naming any of those. Never
+`uint32_t`, never `int`, never `long`.
+
+The rule exists because the alternative was tried and failed quietly. papri
+once carried `uint32_t` measures, which capped a buffer at 4 GiB — and did
+not enforce the cap, it *truncated* to it. `(uint32_t)read_count` on a 5 GiB
+file silently produced 0.7 GiB of it and reported success. A width that is
+"obviously enough" is a width that narrows somewhere, and narrowing a size is
+indistinguishable from success until the data is gone.
+
+It also happens to be what immer does — `size_t sizes[]` in `relaxed_data_t`
+— so following it keeps the rope layout honest against the structure it is
+modelled on.
+
+Scope: the rule is about *bytes*. Counts of other things keep the narrowest
+type that obviously cannot overflow — a node's `child_count` and `height` are
+bounded by the branching factor and the maximum height, so they stay
+`uint32_t`. When in doubt about whether a quantity is bounded, it is not:
+use `size_t`.
+
 ## Verifiable C subset — mandatory for all code
 
 We write C in the subset accepted by **Verifiable C** (the VST program logic;
