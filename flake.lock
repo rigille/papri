@@ -1,5 +1,22 @@
 {
   "nodes": {
+    "certigraph": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1652467123,
+        "narHash": "sha256-/GA3w0Y7XtcVpErb0mMRezUS83IGlV4/bAd3tVHpehU=",
+        "owner": "CertiGraph",
+        "repo": "CertiGraph",
+        "rev": "8781550d8a116abb03ac7931f271ce03a5158a74",
+        "type": "github"
+      },
+      "original": {
+        "owner": "CertiGraph",
+        "repo": "CertiGraph",
+        "rev": "8781550d8a116abb03ac7931f271ce03a5158a74",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1789785513,
@@ -18,6 +35,7 @@
     },
     "root": {
       "inputs": {
+        "certigraph": "certigraph",
         "nixpkgs": "nixpkgs"
       }
     }

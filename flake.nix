@@ -3,7 +3,13 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-  outputs = { self, nixpkgs }:
+  # The CertiCoq generational collector, as carried by CertiGraph. Only the
+  # C is built here; the Coq development that proves it is not.
+  inputs.certigraph.url =
+    "github:CertiGraph/CertiGraph/8781550d8a116abb03ac7931f271ce03a5158a74";
+  inputs.certigraph.flake = false;
+
+  outputs = { self, nixpkgs, certigraph }:
   let
     systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
 
@@ -16,6 +22,31 @@
     pkgsFor = system: import nixpkgs {
       inherit system;
       config.allowUnfree = true;
+    };
+
+    # The collector, built as a plain static library with its headers.
+    certigcFor = pkgs: pkgs.stdenv.mkDerivation {
+      pname   = "certigc";
+      version = "0-unstable-2026";
+      src     = certigraph;
+
+      nativeBuildInputs = [ pkgs.clang ];
+
+      buildPhase = ''
+        cd "CertiGC/GC Source"
+        clang -O2 -fPIC -c gc.c -o gc.o
+        ar rcs libcertigc.a gc.o
+      '';
+
+      installPhase = ''
+        install -Dm644 libcertigc.a $out/lib/libcertigc.a
+        for header in gc.h values.h config.h; do
+          install -Dm644 "$header" "$out/include/certigc/$header"
+        done
+      '';
+
+      meta.description =
+        "CertiCoq generational garbage collector (C sources from CertiGraph)";
     };
 
     papriFor = pkgs: pkgs.stdenv.mkDerivation {
@@ -57,9 +88,13 @@
           pkgs.pkg-config
         ];
 
-        # A library we link against, so buildInputs rather than packages:
-        # that is what puts its pkg-config file on PKG_CONFIG_PATH.
-        buildInputs = [ pkgs.liburing pkgs.tree-sitter ];
+        # Libraries we link against, so buildInputs rather than packages:
+        # that is what puts their pkg-config files on PKG_CONFIG_PATH.
+        buildInputs = [
+          pkgs.liburing
+          pkgs.tree-sitter
+          (certigcFor pkgs)      # the collector, to link and to read
+        ];
 
         shellHook = ''
           # clang, because -Wlarge-by-value-copy is clang-only and it is one
@@ -90,6 +125,7 @@
 
     packages = forAllSystems (system:
     let pkgs = pkgsFor system; in rec {
+      certigc = certigcFor pkgs;
       papri   = papriFor pkgs;
       default = papri;
     });
