@@ -2,6 +2,7 @@
 #define PAPRI_COMMAND_H
 
 #include "address.h"
+#include "grammar.h"
 #include "history.h"
 #include "line_index.h"
 #include "io.h"
@@ -71,7 +72,7 @@ typedef struct Editor {
     Rope      text;
     LineIndex index;      /* line addressing for `text`; see line_index.h */
     IoLoop    *loop;
-    Structure *structure;      /* the grammar, loaded on first use */
+    GrammarTable grammars;    /* suffix -> grammar; see grammar.h */
     Job      jobs[JOB_CAPACITY];
     uint32_t next_job_id;
     uint32_t serial;
@@ -92,7 +93,11 @@ typedef struct Editor {
  *   from the one pool; `current` says which slot the live fields belong to.
  *   `current_line` counts from 1 and names a line of `bytes`, or is 0 when
  *   the buffer is empty. `name` is the NUL-terminated file the buffer came
- *   from, empty when it came from nowhere.
+ *   from, empty when it came from nowhere — and, because a grammar is chosen
+ *   by suffix, it is also what decides how `F` and `{…}` read this buffer.
+ *   grammar_table(&editor->grammars, registrations) is shared by every
+ *   buffer; the registrations are the same, the grammar each buffer gets is
+ *   not.
  */
 
 /* requires: *editor is allocated and writable.
@@ -131,9 +136,28 @@ int editor_load(Editor *editor, const char *path);
  * requires: editor(editor).
  * ensures:  editor(editor); every definition in the current buffer is
  *           written as its line, its kind and its name, and the result is
- *           1; or no grammar was available and the result is 0.
+ *           1; or no grammar governs this buffer's name, a reason is
+ *           written, and the result is 0.
  */
 int editor_list_definitions(Editor *editor);
+
+/* requires: editor(editor).
+ * ensures:  editor(editor); one line per registered grammar is written —
+ *           its suffix, its language and its directory, with the one
+ *           governing the current buffer marked — or a line saying none is
+ *           registered.
+ */
+void editor_report_grammars(const Editor *editor);
+
+/* requires: editor(editor); `text` is NUL-terminated and holds
+ *           `suffix language directory`, whitespace-separated, the directory
+ *           running to the end.
+ * ensures:  editor(editor) with that registration applied, replacing any
+ *           registration for the same suffix, and the result is 1; or the
+ *           text was malformed or the table full, a reason is written, and
+ *           the result is 0. The grammar is not loaded until it is used.
+ */
+int editor_register_grammar(Editor *editor, const char *text);
 
 /* requires: editor(editor); index < BUFFER_CAPACITY.
  * ensures:  editor(editor) with that buffer current, its own text, history

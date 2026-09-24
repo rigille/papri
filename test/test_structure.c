@@ -210,6 +210,99 @@ static void test_parsing_spans_many_windows(Structure *structure)
     report("a buffer spanning many read windows parses whole", before);
 }
 
+/* Selecting by grammar. The properties worth pinning down are the ones a
+ * byte search could not give you: that a selector names a shape, that the
+ * spans come back as a decomposition (ascending and disjoint), and that
+ * nesting picks the outermost rather than producing overlapping foci.
+ *
+ * requires: structure(structure, language, tagged); node_pool is live.
+ * ensures:  `failures` counts the selection properties that did not hold.
+ */
+static void test_selection_by_grammar(Structure *structure)
+{
+    static const char text[] =
+        "int add(int left, int right)\n"
+        "{\n"
+        "    if (left > 0) {\n"
+        "        return left + right;\n"
+        "    }\n"
+        "    return right;\n"
+        "}\n"
+        "\n"
+        "const char *name = \"papri\";\n";
+    Decomposition foci;
+    Rope     rope;
+    size_t   length;
+    size_t   index;
+    size_t   start;
+    size_t   end;
+    size_t   previous;
+    uint32_t count;
+    int      before;
+    int      found;
+    int      ok;
+    int      ordered;
+
+    before = failures;
+    length = sizeof(text) - 1;
+
+    ok = rope_from_bytes(&pool, (const unsigned char *)text, length, &rope);
+    expect(ok == 1, "the source rope is built");
+
+    /* A capture from the tags query: portable across grammars. */
+    found = structure_select(structure, &rope, "definition.function", &foci);
+    expect(found == 1, "one function is captured");
+
+    /* A node type from the grammar itself. The string literal is what a
+     * byte search would have to spell out and guess at. */
+    found = structure_select(structure, &rope, "string_literal", &foci);
+    expect(found == 1, "one string literal is selected");
+    if (found == 1) {
+        start = foci.focus[0].start;
+        end = foci.focus[0].end;
+        ok = rope_copy_range(&rope, start, end - start,
+                             (unsigned char *)captured);
+        expect(ok == 1, "its bytes can be read back");
+        captured[end - start] = '\0';
+        ok = strcmp(captured, "\"papri\"");
+        expect(ok == 0, "and they are the literal, quotes and all");
+    }
+
+    /* `compound_statement` nests: the function body contains the `if`
+     * body. Selecting the outermost is what keeps the result a
+     * decomposition rather than a pile of overlapping spans. */
+    found = structure_select(structure, &rope, "compound_statement", &foci);
+    expect(found == 1, "nested blocks select only the outermost");
+
+    /* Whatever was selected, it must be a decomposition. */
+    count = foci.count;
+    ordered = 1;
+    previous = 0;
+    index = 0;
+    while (index < count) {
+        start = foci.focus[index].start;
+        end = foci.focus[index].end;
+        if (start < previous) {
+            ordered = 0;
+        }
+        if (end < start) {
+            ordered = 0;
+        }
+        if (end > length) {
+            ordered = 0;
+        }
+        previous = end;
+        index = index + 1;
+    }
+    expect(ordered == 1, "the spans are ascending, disjoint and in range");
+
+    /* A selector naming nothing is not an error; it selects nothing. */
+    found = structure_select(structure, &rope, "no_such_node_type", &foci);
+    expect(found == 0, "a selector that names nothing selects nothing");
+
+    report("a selector names a shape and yields a decomposition", before);
+}
+
 /* requires: standard output is writable.
  * ensures:  every test above has run and reported; the result is 0 when
  *           `failures` is 0 and 1 otherwise.
@@ -250,6 +343,7 @@ int main(void)
 
     test_definitions_are_found(structure);
     test_parsing_spans_many_windows(structure);
+    test_selection_by_grammar(structure);
 
     structure_destroy(structure);
     pool_release(&pool);

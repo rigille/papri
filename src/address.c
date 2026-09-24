@@ -357,6 +357,12 @@ int address_resolve(const Rope *rope, const LineIndex *index,
         return ok;
     }
 
+    if (kind == ADDRESS_STRUCTURE) {
+        /* Needs a grammar, which this layer has no business knowing about.
+         * See the spec in address.h. */
+        return 0;
+    }
+
     lines = line_count_of(rope, index);
 
     if (kind == ADDRESS_CURRENT) {
@@ -552,6 +558,163 @@ int address_insert_all(Pool *pool, const Rope *rope,
         }
 
         position = at;
+        index = index + 1;
+    }
+
+    ok = rope_slice(pool, rope, position, total, &gap);
+    if (ok == 0) {
+        return 0;
+    }
+    ok = rope_concat(pool, &built, &gap, result);
+    if (ok == 0) {
+        return 0;
+    }
+
+    return 1;
+}
+
+/* The window the quoting copy slides over the rope, for the same reason the
+ * search has one: a focus may be the whole buffer, and materializing it
+ * would defeat the rope. */
+#define QUOTE_WINDOW 4096
+
+/* Copy a span into a rope of its own.
+ *
+ * rope_slice would be cheaper and is wrong here: a replacement naming the
+ * focus twice would then reach one subtree by two paths within a single
+ * version, and a version must be a tree. Copying is what makes each
+ * quotation a distinct subtree.
+ *
+ * requires: node_pool(pool, live, residual); rope(rope, bytes, share);
+ *           start <= end <= |bytes|; *quoted writable and not *rope.
+ * ensures:  rope(rope, bytes, share) is returned; rope(quoted, s, share')
+ *           where s is bytes[start, end) and share' is of fresh nodes only,
+ *           sharing nothing with *rope, and the result is 1; or allocation
+ *           failed and the result is 0.
+ */
+static int quote_span(Pool *pool, const Rope *rope, size_t start, size_t end,
+                      Rope *quoted)
+{
+    unsigned char window[QUOTE_WINDOW];
+    Rope          built;
+    Rope          piece;
+    Rope          joined;
+    size_t        position;
+    size_t        span;
+    int           ok;
+
+    rope_initialize_empty(&built);
+
+    position = start;
+    while (position < end) {
+        span = end - position;
+        if (span > QUOTE_WINDOW) {
+            span = QUOTE_WINDOW;
+        }
+        ok = rope_copy_range(rope, position, span, window);
+        if (ok == 0) {
+            return 0;
+        }
+        ok = rope_from_bytes(pool, window, span, &piece);
+        if (ok == 0) {
+            return 0;
+        }
+        ok = rope_concat(pool, &built, &piece, &joined);
+        if (ok == 0) {
+            return 0;
+        }
+        memcpy(&built, &joined, sizeof(Rope));
+        position = position + span;
+    }
+
+    memcpy(quoted, &built, sizeof(Rope));
+    return 1;
+}
+
+/* requires: as address.h.
+ * ensures:  as address.h.
+ */
+int address_replace_each(Pool *pool, const Rope *rope,
+                         const Decomposition *decomposition,
+                         const Replacement *replacement,
+                         Rope *result)
+{
+    const unsigned char *text;
+    Rope     built;
+    Rope     joined;
+    Rope     gap;
+    Rope     piece;
+    uint32_t count;
+    uint32_t index;
+    uint32_t runs;
+    uint32_t run;
+    size_t   position;
+    size_t   total;
+    size_t   start;
+    size_t   end;
+    size_t   run_start;
+    size_t   run_length;
+    int      ok;
+
+    count = decomposition->count;
+    total = rope->byte_count;
+    runs = replacement->run_count;
+    text = replacement->text;
+    if (runs == 0) {
+        return 0;
+    }
+
+    rope_initialize_empty(&built);
+
+    position = 0;
+    index = 0;
+    while (index < count) {
+        start = decomposition->focus[index].start;
+        end = decomposition->focus[index].end;
+
+        ok = rope_slice(pool, rope, position, start, &gap);
+        if (ok == 0) {
+            return 0;
+        }
+        ok = rope_concat(pool, &built, &gap, &joined);
+        if (ok == 0) {
+            return 0;
+        }
+        memcpy(&built, &joined, sizeof(Rope));
+
+        run = 0;
+        while (run < runs) {
+            run_start = replacement->run_start[run];
+            run_length = replacement->run_length[run];
+
+            /* Fresh each time, never spliced twice: see the note above. */
+            ok = rope_from_bytes(pool, text + run_start, run_length, &piece);
+            if (ok == 0) {
+                return 0;
+            }
+            ok = rope_concat(pool, &built, &piece, &joined);
+            if (ok == 0) {
+                return 0;
+            }
+            memcpy(&built, &joined, sizeof(Rope));
+
+            /* Between two runs stands one quotation of the focus. */
+            if (run + 1 < runs) {
+                ok = quote_span(pool, rope, start, end, &piece);
+                if (ok == 0) {
+                    return 0;
+                }
+                ok = rope_concat(pool, &built, &piece, &joined);
+                if (ok == 0) {
+                    return 0;
+                }
+                memcpy(&built, &joined, sizeof(Rope));
+            }
+
+            run = run + 1;
+        }
+
+        position = end;
         index = index + 1;
     }
 

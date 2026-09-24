@@ -162,28 +162,25 @@ Structure *structure_create(const char *directory, const char *language)
         return NULL;
     }
 
+    /* A grammar with no tags query is still a grammar: its node types are
+     * what `{…}` selects by, and tree-sitter-json ships no tags.scm at all.
+     * Only `F` and a dotted selector need the query, and they ask. */
     query_source = NULL;
     query_length = read_tags_query(directory, &query_source);
-    if (query_length == 0) {
-        dlclose(structure->handle);
-        free(structure);
-        return NULL;
-    }
-
-    error_offset = 0;
-    error_type = TSQueryErrorNone;
-    structure->tags = ts_query_new(structure->language, query_source,
-                                   query_length, &error_offset, &error_type);
-    free(query_source);
-    if (structure->tags == NULL) {
-        dlclose(structure->handle);
-        free(structure);
-        return NULL;
+    if (query_length > 0) {
+        error_offset = 0;
+        error_type = TSQueryErrorNone;
+        structure->tags = ts_query_new(structure->language, query_source,
+                                       query_length, &error_offset,
+                                       &error_type);
+        free(query_source);
     }
 
     structure->parser = ts_parser_new();
     if (structure->parser == NULL) {
-        ts_query_delete(structure->tags);
+        if (structure->tags != NULL) {
+            ts_query_delete(structure->tags);
+        }
         dlclose(structure->handle);
         free(structure);
         return NULL;
@@ -191,6 +188,20 @@ Structure *structure_create(const char *directory, const char *language)
     ts_parser_set_language(structure->parser, structure->language);
 
     return structure;
+}
+
+/* requires: as structure.h.
+ * ensures:  as structure.h.
+ */
+int structure_has_tags(const Structure *structure)
+{
+    TSQuery *tags;
+
+    tags = structure->tags;
+    if (tags == NULL) {
+        return 0;
+    }
+    return 1;
 }
 
 /* requires: as structure.h.
@@ -213,19 +224,282 @@ void structure_destroy(Structure *structure)
     free(structure);
 }
 
+/* requires: structure(structure, language); rope(rope, bytes, share);
+ *           *state is writable and stays valid until the parse returns.
+ * ensures:  rope(rope, bytes, share); the result is the parse tree, which
+ *           the caller deletes, or null when the buffer could not be parsed.
+ *           The rope is read through a callback and never materialized.
+ */
+static TSTree *parse_rope(Structure *structure, const Rope *rope,
+                          ReadState *state)
+{
+    TSInput input;
+    TSTree *tree;
+
+    state->rope = rope;
+
+    memset(&input, 0, sizeof(input));
+    input.payload = state;
+    input.read = read_rope;
+    input.encoding = TSInputEncodingUTF8;
+
+    tree = ts_parser_parse(structure->parser, NULL, input);
+    return tree;
+}
+
+/* Insert a span, keeping the decomposition a decomposition.
+ *
+ * Ascending and pairwise disjoint is a property the type promises, and
+ * neither the tree walk nor a query guarantees it on its own — a query may
+ * report matches in any order, and two captures may nest. So the span goes
+ * in at its sorted position, and one that would overlap a neighbour is
+ * dropped rather than allowed to break the invariant.
+ *
+ * requires: *result writable and holding a decomposition.
+ * ensures:  *result holds a decomposition again, with [start, end) added
+ *           when it overlapped nothing already there, and the result is 1;
+ *           or the decomposition was full and the result is 0.
+ */
+static int insert_span(Decomposition *result, size_t start, size_t end)
+{
+    uint32_t count;
+    uint32_t index;
+    uint32_t position;
+    size_t   neighbour_start;
+    size_t   neighbour_end;
+
+    count = result->count;
+    if (count >= DECOMPOSITION_CAPACITY) {
+        return 0;
+    }
+
+    index = count;
+    while (index > 0) {
+        neighbour_start = result->focus[index - 1].start;
+        if (neighbour_start <= start) {
+            break;
+        }
+        index = index - 1;
+    }
+
+    if (index > 0) {
+        neighbour_end = result->focus[index - 1].end;
+        if (neighbour_end > start) {
+            return 1;
+        }
+    }
+    if (index < count) {
+        neighbour_start = result->focus[index].start;
+        if (end > neighbour_start) {
+            return 1;
+        }
+    }
+
+    position = count;
+    while (position > index) {
+        result->focus[position].start = result->focus[position - 1].start;
+        result->focus[position].end = result->focus[position - 1].end;
+        position = position - 1;
+    }
+    result->focus[index].start = start;
+    result->focus[index].end = end;
+    result->count = count + 1;
+    return 1;
+}
+
+/* requires: structure(structure, language); `selector` is NUL-terminated;
+ *           *result writable and holding a decomposition.
+ * ensures:  *result also holds the extent of every node the tags query
+ *           captures under that name, and the result is 1; or there were
+ *           more than a decomposition can hold and the result is 0.
+ */
+static int select_by_capture(Structure *structure, TSNode root,
+                             const char *selector, Decomposition *result)
+{
+    TSQueryCursor *cursor;
+    TSQueryMatch   match;
+    TSNode         captured;
+    const char    *capture_name;
+    size_t         selector_length;
+    uint32_t       capture_length;
+    uint32_t       index;
+    uint32_t       begin;
+    uint32_t       finish;
+    int            more;
+    int            difference;
+    int            ok;
+
+    selector_length = strlen(selector);
+
+    cursor = ts_query_cursor_new();
+    ts_query_cursor_exec(cursor, structure->tags, root);
+
+    more = ts_query_cursor_next_match(cursor, &match);
+    while (more == 1) {
+        index = 0;
+        while (index < match.capture_count) {
+            captured = match.captures[index].node;
+            capture_name = ts_query_capture_name_for_id(
+                structure->tags, match.captures[index].index,
+                &capture_length);
+
+            difference = 1;
+            if (capture_length == selector_length) {
+                difference = memcmp(capture_name, selector, selector_length);
+            }
+            if (difference == 0) {
+                begin = ts_node_start_byte(captured);
+                finish = ts_node_end_byte(captured);
+                ok = insert_span(result, begin, finish);
+                if (ok == 0) {
+                    ts_query_cursor_delete(cursor);
+                    return 0;
+                }
+            }
+            index = index + 1;
+        }
+        more = ts_query_cursor_next_match(cursor, &match);
+    }
+
+    ts_query_cursor_delete(cursor);
+    return 1;
+}
+
+/* A pre-order walk that does not descend into what it selected, so nested
+ * nodes of one type yield the outermost and the spans come out ascending
+ * and disjoint without any sorting.
+ *
+ * requires: `selector` is NUL-terminated; *result writable and holding a
+ *           decomposition.
+ * ensures:  *result also holds the extent of every outermost node whose type
+ *           is `selector`, and the result is 1; or there were more than a
+ *           decomposition can hold and the result is 0.
+ */
+static int select_by_node_type(TSNode root, const char *selector,
+                               Decomposition *result)
+{
+    TSTreeCursor cursor;
+    TSNode       node;
+    const char  *type;
+    uint32_t     begin;
+    uint32_t     finish;
+    int          running;
+    int          matched;
+    int          moved;
+    int          difference;
+    int          ok;
+
+    cursor = ts_tree_cursor_new(root);
+
+    running = 1;
+    while (running == 1) {
+        node = ts_tree_cursor_current_node(&cursor);
+        type = ts_node_type(node);
+        difference = strcmp(type, selector);
+
+        matched = 0;
+        if (difference == 0) {
+            matched = 1;
+            begin = ts_node_start_byte(node);
+            finish = ts_node_end_byte(node);
+            ok = insert_span(result, begin, finish);
+            if (ok == 0) {
+                ts_tree_cursor_delete(&cursor);
+                return 0;
+            }
+        }
+
+        moved = 0;
+        if (matched == 0) {
+            moved = ts_tree_cursor_goto_first_child(&cursor);
+        }
+        while (moved == 0 && running == 1) {
+            moved = ts_tree_cursor_goto_next_sibling(&cursor);
+            if (moved == 0) {
+                moved = ts_tree_cursor_goto_parent(&cursor);
+                if (moved == 0) {
+                    running = 0;
+                } else {
+                    /* At the parent, which has already been visited: keep
+                     * climbing until a sibling turns up. */
+                    moved = 0;
+                }
+            }
+        }
+    }
+
+    ts_tree_cursor_delete(&cursor);
+    return 1;
+}
+
+/* requires: as structure.h.
+ * ensures:  as structure.h.
+ */
+int structure_select(Structure *structure, const Rope *rope,
+                     const char *selector, Decomposition *result)
+{
+    ReadState  *state;
+    TSTree     *tree;
+    TSNode      root;
+    const char *dot;
+    TSQuery    *tags;
+    uint32_t    count;
+    int         ok;
+
+    result->count = 0;
+
+    /* No tree-sitter node type contains a dot, so the dot is what tells a
+     * tags-query capture from a grammar node type. */
+    dot = strchr(selector, '.');
+    if (dot != NULL) {
+        tags = structure->tags;
+        if (tags == NULL) {
+            return -2;
+        }
+    }
+
+    state = malloc(sizeof(ReadState));
+    if (state == NULL) {
+        return -1;
+    }
+
+    tree = parse_rope(structure, rope, state);
+    if (tree == NULL) {
+        free(state);
+        return -1;
+    }
+    root = ts_tree_root_node(tree);
+
+    if (dot == NULL) {
+        ok = select_by_node_type(root, selector, result);
+    } else {
+        ok = select_by_capture(structure, root, selector, result);
+    }
+
+    ts_tree_delete(tree);
+    free(state);
+
+    if (ok == 0) {
+        result->count = 0;
+        return -1;
+    }
+    count = result->count;
+    return (int)count;
+}
+
 /* requires: as structure.h.
  * ensures:  as structure.h.
  */
 int structure_list_definitions(Structure *structure, const Rope *rope)
 {
     ReadState     *state;
-    TSInput        input;
     TSTree        *tree;
     TSNode         root;
     TSQueryCursor *cursor;
     TSQueryMatch   match;
     TSNode         captured;
     TSPoint        start;
+    TSQuery       *tags;
     char           name[NAME_CAPACITY];
     char           label[NAME_CAPACITY * 2];
     const char    *capture_name;
@@ -240,18 +514,17 @@ int structure_list_definitions(Structure *structure, const Rope *rope)
     int            ok;
     int            more;
 
+    tags = structure->tags;
+    if (tags == NULL) {
+        return -2;
+    }
+
     state = malloc(sizeof(ReadState));
     if (state == NULL) {
         return -1;
     }
-    state->rope = rope;
 
-    memset(&input, 0, sizeof(input));
-    input.payload = state;
-    input.read = read_rope;
-    input.encoding = TSInputEncodingUTF8;
-
-    tree = ts_parser_parse(structure->parser, NULL, input);
+    tree = parse_rope(structure, rope, state);
     if (tree == NULL) {
         free(state);
         return -1;

@@ -59,6 +59,23 @@
         "CertiCoq generational garbage collector (C sources from CertiGraph)";
     };
 
+    # papri picks a grammar by file suffix, from a table it reads at
+    # startup. This is that table for the devShell: three lines say what
+    # `F` and `{…}` mean for each language papri is likely to meet here.
+    # `.json` is in the list on purpose: tree-sitter-json ships no
+    # queries/tags.scm, so it proves a grammar with no tags query is still
+    # a grammar you can select node types from.
+    grammarsFor = pkgs: pkgs.writeText "papri-grammars" ''
+      # suffix  language  directory
+      .c    c       ${pkgs.tree-sitter-grammars.tree-sitter-c}
+      .h    c       ${pkgs.tree-sitter-grammars.tree-sitter-c}
+      .py   python  ${pkgs.tree-sitter-grammars.tree-sitter-python}
+      .go   go      ${pkgs.tree-sitter-grammars.tree-sitter-go}
+      .rs   rust    ${pkgs.tree-sitter-grammars.tree-sitter-rust}
+      .nix  nix     ${pkgs.tree-sitter-grammars.tree-sitter-nix}
+      .json json    ${pkgs.tree-sitter-grammars.tree-sitter-json}
+    '';
+
     papriFor = pkgs: pkgs.stdenv.mkDerivation {
       pname   = "papri";
       version = "0.1.0";
@@ -113,7 +130,14 @@
           export CC=clang
 
           # A tree-sitter grammar is a shared object plus a tags query,
-          # loaded at run time. papri reads these two to find one.
+          # loaded at run time. PAPRI_GRAMMARS names a table of them, one
+          # line per suffix, which is how a session holding a C file and a
+          # Python file gets the right parser for each.
+          export PAPRI_GRAMMARS="${grammarsFor pkgs}"
+
+          # The older pair, still read, and now meaning "the grammar for
+          # anything no suffix claims". Keeping it is what makes a file with
+          # no suffix, or one named Makefile, still parse as something.
           export PAPRI_GRAMMAR="${pkgs.tree-sitter-grammars.tree-sitter-c}"
           export PAPRI_LANGUAGE=c
 

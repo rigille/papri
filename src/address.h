@@ -40,7 +40,8 @@ typedef enum AddressKind {
     ADDRESS_BYTE,           /* the empty span at byte `first` */
     ADDRESS_BYTE_RANGE,     /* bytes [first, last) */
     ADDRESS_MATCH,          /* every occurrence of the pattern */
-    ADDRESS_LINES_MATCHING  /* every line containing the pattern */
+    ADDRESS_LINES_MATCHING, /* every line containing the pattern */
+    ADDRESS_STRUCTURE       /* every node the grammar selector names */
 } AddressKind;
 
 /* M2 matches literal bytes. A regex engine is later work; when it lands it
@@ -63,6 +64,30 @@ typedef struct Decomposition {
     uint32_t count;
 } Decomposition;
 
+#define REPLACEMENT_TEXT_CAPACITY 8192
+#define REPLACEMENT_RUN_CAPACITY  64
+
+/* A replacement that may quote the text it replaces.
+ *
+ * The focus is the only thing a replacement could refer to — the address
+ * already decided what it is — so there is exactly one quotable value and no
+ * numbering to invent. Written `\1` in a command; held here as the literal
+ * runs between the quotations, which needs no sentinel byte and so cannot be
+ * confused by a byte the user actually typed.
+ *
+ * The replacement for a focus is
+ *
+ *     run[0] ++ focus ++ run[1] ++ focus ++ … ++ run[run_count - 1]
+ *
+ * so run_count is always at least 1, and run_count - 1 is how many times the
+ * focus is quoted. */
+typedef struct Replacement {
+    unsigned char text[REPLACEMENT_TEXT_CAPACITY];
+    size_t        run_start[REPLACEMENT_RUN_CAPACITY];
+    size_t        run_length[REPLACEMENT_RUN_CAPACITY];
+    uint32_t      run_count;
+} Replacement;
+
 /* ── Abstract predicates ────────────────────────────────────────────────────
  * address(address, form)
  *   *address is a pure value naming `form`. When the form carries a pattern,
@@ -76,6 +101,13 @@ typedef struct Decomposition {
  *   `bytes`, pairwise disjoint, in ascending order, none extending past
  *   |bytes|. The gaps between them are implied, so the pair (spans, bytes)
  *   determines the isomorphism above.
+ *
+ * replacement(replacement, runs)
+ *   *replacement is a pure value: `runs` is a non-empty sequence of at most
+ *   REPLACEMENT_RUN_CAPACITY byte strings, together at most
+ *   REPLACEMENT_TEXT_CAPACITY bytes, each run_start/run_length pair naming a
+ *   range of `text`. It denotes the function from a focus to
+ *   run[0] ++ focus ++ … ++ run[|runs| - 1].
  */
 
 /* requires: rope(rope, bytes, share); address(address, form); current_line
@@ -85,6 +117,12 @@ typedef struct Decomposition {
  *           form selects, and the outcome is 1; or the form named something
  *           outside the buffer, or selected more than
  *           DECOMPOSITION_CAPACITY foci, and the outcome is 0.
+ *
+ *           ADDRESS_STRUCTURE is refused here, with `result` left empty and
+ *           the outcome 0. It is the one form whose meaning is not a
+ *           function of the bytes: it needs a grammar, and a grammar belongs
+ *           to a buffer's name rather than to a rope. The command layer,
+ *           which knows both, resolves it through structure_select.
  */
 int address_resolve(const Rope *rope, const LineIndex *index,
                     const Address *address, size_t current_line,
@@ -129,6 +167,27 @@ int address_replace_all(Pool *pool, const Rope *rope,
                         const unsigned char *replacement,
                         size_t replacement_length,
                         Rope *result);
+
+/* The same isomorphism, with a replacement that may quote the focus it
+ * replaces.
+ *
+ * The quoted text is COPIED out of the buffer rather than sliced from it, so
+ * that a replacement naming the focus twice does not put one subtree into
+ * the result twice. Slicing would be cheaper and would build a DAG; see the
+ * note above for why a version may not be one.
+ *
+ * requires: node_pool(pool, live, residual); rope(rope, bytes, share);
+ *           decomposition(decomposition, spans, bytes);
+ *           replacement(replacement, runs); *result writable and not *rope.
+ * ensures:  every input share is returned; rope(result, bytes', share')
+ *           where bytes' is bytes with each span `focus` replaced by
+ *           run[0] ++ focus ++ … ++ run[|runs| - 1], and the result is 1; or
+ *           allocation failed and the result is 0.
+ */
+int address_replace_each(Pool *pool, const Rope *rope,
+                         const Decomposition *decomposition,
+                         const Replacement *replacement,
+                         Rope *result);
 
 /* requires: node_pool(pool, live, residual); rope(rope, bytes, share);
  *           decomposition(decomposition, spans, bytes); `before` says

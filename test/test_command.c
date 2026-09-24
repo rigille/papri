@@ -263,6 +263,62 @@ static void test_substitution(void)
     report("substitution composes addressing with matching", before);
 }
 
+/* `\1` in a replacement stands for the text being replaced. It is not a
+ * byte, so the interesting cases are the ones where treating it as a byte
+ * would go wrong: naming it twice, naming it in a verb that is not `s`, and
+ * a literal backslash-one that must still mean a literal backslash-one.
+ *
+ * requires: node_pool is live.
+ * ensures:  `failures` counts the quoting properties that did not hold.
+ */
+static void test_replacement_quotes_the_match(void)
+{
+    int before;
+    int ok;
+
+    before = failures;
+
+    load_text("the cat sat on the mat\n");
+    ok = run("%s/at/[\\1]/");
+    expect(ok == 1, "quoting the match succeeds");
+    expect_buffer("the c[at] s[at] on the m[at]\n", "%s/at/[\\1]/");
+
+    /* Twice in one replacement. Each quotation must be its own copy; one
+     * subtree reached by two paths would make the version a DAG. */
+    load_text("ab\n");
+    ok = run("%s/a/<\\1|\\1>/");
+    expect(ok == 1, "quoting the match twice succeeds");
+    expect_buffer("<a|a>b\n", "two quotations");
+
+    /* `c` replaces the focus, so `\1` there is the focus. */
+    load_text("one\ntwo\n");
+    ok = run("1c[\\1]");
+    expect(ok == 1, "quoting the focus in c succeeds");
+    expect_buffer("[one\n]two\n", "1c[\\1]");
+
+    /* A quotation at either end leaves an empty run beside it. */
+    load_text("xay\n");
+    ok = run("%s/a/\\1\\1/");
+    expect(ok == 1, "a replacement that is nothing but quotations succeeds");
+    expect_buffer("xaay\n", "empty runs at both ends");
+
+    /* `\\` resolves to one backslash, so `\\1` is a literal backslash-one
+     * and must not be read as a quotation. */
+    load_text("cat\n");
+    ok = run("%s/cat/a\\\\1b/");
+    expect(ok == 1, "an escaped backslash before a 1 succeeds");
+    expect_buffer("a\\1b\n", "literal backslash-one");
+
+    /* The whole buffer as the focus, quoted: the copy path has to handle a
+     * span longer than one leaf. */
+    load_text("0123456789abcdef0123456789abcdef");
+    ok = run("%c<\\1>");
+    expect(ok == 1, "quoting the whole buffer succeeds");
+    expect_buffer("<0123456789abcdef0123456789abcdef>", "whole buffer quoted");
+
+    report("a replacement can quote the text it replaces", before);
+}
+
 /* requires: node_pool is live.
  * ensures:  `failures` counts the pattern addressing properties that did not
  *           hold.
@@ -463,6 +519,7 @@ int main(void)
     test_byte_addresses();
     test_insert_and_append();
     test_substitution();
+    test_replacement_quotes_the_match();
     test_pattern_addresses();
     test_old_versions_survive_edits();
     test_buffers_are_independent();

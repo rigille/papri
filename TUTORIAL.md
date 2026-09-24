@@ -103,6 +103,7 @@ names a **region of bytes**, and everything else follows from that.
 | `#2,#5` | bytes 2 up to (not including) 5 |
 | `/text/` | every occurrence of `text` |
 | `g/text/` | every line containing `text` |
+| `{sel}` | every node the grammar calls `sel` — section 8 |
 
 Try the byte forms. They reach inside a line, which line-numbered addresses
 cannot:
@@ -155,7 +156,8 @@ an accident, and section 4 is about what it means.
 | `s/pat/rep/` | replace `pat` with `rep`, within the region |
 
 In TEXT you can write `\n` for a newline, `\t` for a tab, and `\\` for a
-backslash.
+backslash. In `c` and `s`, which both *replace* something, `\1` stands for
+whatever is being replaced — section 5 comes back to that.
 
 ```
 2d
@@ -276,6 +278,39 @@ A pattern that does not occur changes nothing and says so:
 ```
 
 Matching is **literal bytes**. There is no regular expression engine yet.
+
+### Keeping what you replaced
+
+A replacement can quote the text it is replacing, by writing `\1`:
+
+```sh
+printf 'the cat sat on the mat\n' > cats.txt
+papri cats.txt
+```
+
+```
+%s/at/[\1]/
+%p
+the c[at] s[at] on the m[at]
+```
+
+Write it twice and you get it twice:
+
+```
+%s/at/<\1|\1>/
+```
+
+`ed` spells this `&`, and numbers its back-references because a regular
+expression has groups to number. papri has no groups: the address already
+decided what the focus is, so there is exactly one thing `\1` could mean and
+no numbering to invent. It works in `c` for the same reason — `c` replaces
+the focus, so `\1` there is the focus:
+
+```
+1c/* \1 */
+```
+
+A literal backslash-one is still `\\1`, as you would expect.
 
 ## 6. The buffer is bytes
 
@@ -400,11 +435,99 @@ F
 163,170p
 ```
 
-The parse comes from tree-sitter, loaded at run time. The devShell points
-`PAPRI_GRAMMAR` at the C grammar; for another language set it to that
-grammar's directory and `PAPRI_LANGUAGE` to its name. Any grammar that ships
-a `queries/tags.scm` works, with no change to papri. Without a grammar `F`
-says so and does nothing else.
+### Addressing by grammar
+
+`F` prints. The same parse can also *address*, and that is the more
+interesting half. `{…}` is an address like any other, and it selects the
+nodes the grammar calls by that name:
+
+```
+{definition.function}=
+#99,#126	line 8
+#281,#305	line 19
+#419,#457	line 28
+...
+```
+
+Since it is an ordinary address, every verb already works on it. No verb had
+to learn anything:
+
+```
+{comment}d               delete every comment
+{string_literal}p        print every string literal
+{definition.function}n   print every function, numbered
+{string_literal}c L\1    make every string literal a wide one
+```
+
+That last line is where `\1` earns its keep: the address found the spans, and
+the replacement puts them back with something around them.
+
+A selector is read one of two ways, and the dot is what tells them apart,
+since no tree-sitter node type contains one:
+
+| Selector | Means |
+|---|---|
+| `definition.function` | a capture in the grammar's `queries/tags.scm` |
+| `function_definition` | a node type in the grammar itself |
+
+Captures are portable — every tags query defines `definition.function`, so
+that address means the same thing in C, Python and Go. Node types reach
+anything at all, at the price of naming one grammar's vocabulary. `tree-sitter`
+will print a grammar's node types for you, and highlights files are full of
+them.
+
+Nesting selects the outermost: `{compound_statement}` in a C function gives
+you the function body, not the body and every block inside it. An address has
+to be a *decomposition* — disjoint spans in order — and overlapping foci are
+not one.
+
+### Which grammar, for which file
+
+The parse comes from tree-sitter, loaded at run time, and which grammar a
+buffer gets is decided by its **name's suffix**. `G` shows the table:
+
+```
+G
+ *	c	/nix/store/…-tree-sitter-c
+*.c	c	/nix/store/…-tree-sitter-c
+ .h	c	/nix/store/…-tree-sitter-c
+ .py	python	/nix/store/…-tree-sitter-python
+ .go	go	/nix/store/…-tree-sitter-go
+ .rs	rust	/nix/store/…-tree-sitter-rust
+ .nix	nix	/nix/store/…-tree-sitter-nix
+ .json	json	/nix/store/…-tree-sitter-json
+```
+
+`*` marks the row this buffer's name selects — here `.c`, because the buffer
+is `src/pool.c`. The row whose *suffix* is `*` is the catch-all, used only
+when nothing more specific matches. Open a Python file in another buffer and
+`@1 F` parses it as Python while `F` still parses this one as C.
+
+The table comes from the file named by `$PAPRI_GRAMMARS`, one registration
+per line — suffix, language, directory — with `#` for comments:
+
+```
+# suffix  language  directory
+.c    c       /path/to/tree-sitter-c
+.py   python  /path/to/tree-sitter-python
+```
+
+The devShell writes one and points `$PAPRI_GRAMMARS` at it. You can also add
+a row mid-session, which is the fastest way to try a new grammar:
+
+```
+G .rb ruby /path/to/tree-sitter-ruby
+```
+
+`$PAPRI_GRAMMAR` and `$PAPRI_LANGUAGE`, which used to be the whole story,
+still work: they register the catch-all row. A grammar is loaded the first
+time a buffer actually needs it, so a table of ten costs nothing until you
+open ten languages.
+
+A grammar with no `queries/tags.scm` — tree-sitter-json ships none — still
+works for node types; only `F` and a dotted selector need the query, and they
+say so rather than failing quietly. Without any grammar for this buffer's
+name, `F` and `{…}` say that too, and do nothing else.
 
 ## 9. Work that happens while you type
 
@@ -484,8 +607,11 @@ discovering them:
   moves it; it starts at line 1 and is only clamped when the buffer shrinks.
   Address lines explicitly.
 - **`q` does not warn about unsaved changes.** It quits.
-- **Addresses do not compose arbitrarily.** There is no `/start/,/end/`.
-- **One grammar at a time**, chosen by environment variable, not per buffer.
+- **Addresses do not compose arbitrarily.** There is no `/start/,/end/`, and
+  no `{definition.function}/name/` either — `s` is the only form that narrows
+  one address with another.
+- **A structural address re-parses the buffer** every time it is used. Fine
+  for a file, noticeable in a loop over a large one.
 
 ## Command reference
 
@@ -503,6 +629,7 @@ Addresses
   #N,#M        bytes N up to M
   /text/       every occurrence of text
   g/text/      every line containing text
+  {sel}        every node the grammar calls sel
 
 Verbs
   p  n         print; print with line numbers
@@ -514,6 +641,11 @@ Verbs
   a TEXT       insert TEXT after
   s/pat/rep/   substitute within the region
   F            print the definitions in the buffer
+
+Grammars
+  G            list the grammars, marking this buffer's
+  G SUF LANG DIR
+               register a grammar for files ending in SUF
 
 Files and buffers
   e FILE       load into the current buffer
@@ -531,6 +663,7 @@ Background
   q            quit
 
 Escapes in TEXT: \n  \t  \\
+In the replacement of c and s, \1 is the text being replaced.
 ```
 
 ## Where to go next

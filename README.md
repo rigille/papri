@@ -74,6 +74,7 @@ An address, then a verb. An address alone prints.
 | `#N` / `#N,#M` | a byte offset, or a byte range |
 | `/text/` | every occurrence of `text` |
 | `g/text/` | every line containing `text` |
+| `{sel}` | every node the grammar's `sel` names |
 
 | Verb | Does |
 |---|---|
@@ -84,15 +85,54 @@ An address, then a verb. An address alone prints.
 | `i TEXT` `a TEXT` | insert before, or append after |
 | `s/pat/rep/` | substitute within the focus |
 | `F` | print the definitions in the buffer |
+| `G` `G suf lang dir` | list grammars, or register one for a suffix |
 | `e` `E` `w` | load, load into a new buffer, write |
 | `b` `bN` `@N cmd` | list buffers, switch, or run a command against one |
 | `&e f` `&c f` `&` | load or count in the background, list jobs |
 | `q` | quit |
 
-Escapes in TEXT: `\n`, `\t`, `\\`.
+Escapes in TEXT: `\n`, `\t`, `\\`. In the replacement of `c` and `s`, `\1`
+stands for the text being replaced — `%s/at/[\1]/` gives `[at]`. There is one
+quotable value and so no numbering to invent: the address already decided
+what the focus is.
 
 Matching is literal bytes today. A regex engine is later work, and lands as
 two more address forms without moving anything else.
+
+## Selecting by grammar
+
+`/text/` finds bytes that look alike. `{…}` finds bytes that *mean* alike,
+which is the thing a byte pattern cannot do however good it gets.
+
+```
+{definition.function}=      the extents of every function
+{comment}d                  delete every comment
+{string_literal}c L\1       prefix every string literal
+```
+
+A selector is read one of two ways, told apart by a dot, which no
+tree-sitter node type contains: `definition.function` is a capture in the
+grammar's `queries/tags.scm`, portable across languages; `function_definition`
+is a node type in the grammar itself, which reaches anything at all at the
+price of naming one grammar's vocabulary. The result is an ordinary
+decomposition, so every verb already works on it — that is the whole benefit
+of addresses being data.
+
+Which grammar a buffer gets is decided by its name's suffix, from a table
+read at startup:
+
+```
+# $PAPRI_GRAMMARS — suffix, language, directory
+.c    c       /path/to/tree-sitter-c
+.h    c       /path/to/tree-sitter-c
+.py   python  /path/to/tree-sitter-python
+```
+
+`G` prints the table with the current buffer's row marked; `G .rs rust DIR`
+adds a row without restarting. `$PAPRI_GRAMMAR` and `$PAPRI_LANGUAGE` still
+work and now mean the catch-all row, `*`, consulted only when no suffix
+matches. Grammars load on first use, one per row, so configuring six costs
+nothing until you open six languages.
 
 ## Why the odd-looking C
 
@@ -133,9 +173,14 @@ recorded next to it:
 - `src/io.c` — `liburing.h` reaches `stdatomic.h` and CompCert stops at
   `_Atomic`.
 - `src/structure.c` — tree-sitter and `dlfcn`, same story.
+- `src/collector.c` — `gc.h`, whose allocator attributes CompCert will not
+  parse.
 
-Both boundary files are kept thin and expose opaque handles, so everything
-above them stays inside the subset and stays gated.
+Each boundary file is kept thin and exposes opaque handles, so everything
+above it stays inside the subset and stays gated. `src/grammar.c` is the
+shape that buys: deciding *which* grammar a buffer gets is string handling
+and nothing else, so it lives on our side of the tree-sitter boundary and
+goes through every gate.
 
 ## Not yet done
 

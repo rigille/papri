@@ -28,6 +28,16 @@
 static void adopt_edit(Editor *editor, const Rope *edited,
                        const Decomposition *foci);
 
+/* Defined below, beside the rest of the grammar machinery. Addresses need
+ * it, and it needs everything the editor knows about buffers, so the
+ * declaration comes up here and the definition stays down there.
+ *
+ * requires: editor(editor).
+ * ensures:  editor(editor); the result is the grammar governing this
+ *           buffer's name, loaded, or null with a reason written.
+ */
+static Structure *grammar_for_buffer(Editor *editor);
+
 /* Defined below, beside the rest of the job machinery.
  *
  * requires: editor(editor); `path` is NUL-terminated.
@@ -220,6 +230,107 @@ static size_t read_delimited(const char *line, size_t position,
     return at;
 }
 
+/* The replacement text of a verb that replaces, where `\1` stands for the
+ * text being replaced.
+ *
+ * This cannot go through read_delimited, and the reason is worth stating.
+ * read_delimited resolves every escape to a byte, and `\1` does not denote a
+ * byte — it denotes "whatever was there". Resolving it to some sentinel byte
+ * would make a replacement mean something different depending on what the
+ * user happened to type, so it is kept as a break BETWEEN literal runs
+ * instead, which nothing typed can imitate.
+ *
+ * requires: `line` is NUL-terminated and `position` indexes the byte after
+ *           an opening delimiter; *replacement writable.
+ * ensures:  replacement(replacement, runs) where the runs are the text up to
+ *           the next unescaped delimiter — or to the end of the line when
+ *           the delimiter is NUL — split at every `\1`, with `\n`, `\t` and
+ *           `\\` resolved and any other `\X` standing for X; the result is
+ *           the position past the closing delimiter when there was one. Or
+ *           the text or its runs did not fit, and the result is
+ *           PARSE_FAILED.
+ */
+static size_t read_replacement(const char *line, size_t position,
+                               char delimiter, Replacement *replacement)
+{
+    size_t        at;
+    size_t        written;
+    size_t        begin;
+    uint32_t      runs;
+    char          value;
+    char          escaped;
+    unsigned char byte;
+    int           quote;
+
+    at = position;
+    written = 0;
+    runs = 1;
+    replacement->run_start[0] = 0;
+    replacement->run_length[0] = 0;
+
+    value = line[at];
+    while (value != '\0') {
+        if (value == delimiter) {
+            begin = replacement->run_start[runs - 1];
+            replacement->run_length[runs - 1] = written - begin;
+            replacement->run_count = runs;
+            return at + 1;
+        }
+
+        quote = 0;
+        byte = (unsigned char)value;
+
+        if (value == '\\') {
+            escaped = line[at + 1];
+            if (escaped == 'n') {
+                byte = '\n';
+                at = at + 2;
+            } else if (escaped == 't') {
+                byte = '\t';
+                at = at + 2;
+            } else if (escaped == '\\') {
+                byte = '\\';
+                at = at + 2;
+            } else if (escaped == '1') {
+                quote = 1;
+                at = at + 2;
+            } else if (escaped == '\0') {
+                byte = '\\';
+                at = at + 1;
+            } else {
+                byte = (unsigned char)escaped;
+                at = at + 2;
+            }
+        } else {
+            at = at + 1;
+        }
+
+        if (quote == 1) {
+            if (runs >= REPLACEMENT_RUN_CAPACITY) {
+                return PARSE_FAILED;
+            }
+            begin = replacement->run_start[runs - 1];
+            replacement->run_length[runs - 1] = written - begin;
+            replacement->run_start[runs] = written;
+            replacement->run_length[runs] = 0;
+            runs = runs + 1;
+        } else {
+            if (written >= REPLACEMENT_TEXT_CAPACITY) {
+                return PARSE_FAILED;
+            }
+            replacement->text[written] = byte;
+            written = written + 1;
+        }
+
+        value = line[at];
+    }
+
+    begin = replacement->run_start[runs - 1];
+    replacement->run_length[runs - 1] = written - begin;
+    replacement->run_count = runs;
+    return at;
+}
+
 /* requires: `line` is NUL-terminated; `position` indexes into it;
  *           *command writable.
  * ensures:  command->address and command->addressed describe whatever
@@ -278,6 +389,21 @@ static size_t parse_address(const char *line, size_t position,
         }
         captured = length_slot;
         command->address.kind = ADDRESS_MATCH;
+        command->address.pattern = command->pattern;
+        command->address.pattern_length = captured;
+        command->addressed = 1;
+        return at;
+    }
+
+    if (value == 0x7B) {                      /* {sel}  every such node */
+        at = at + 1;
+        at = read_delimited(line, at, 0x7D, command->pattern,
+                            PATTERN_CAPACITY, &length_slot);
+        if (at == PARSE_FAILED) {
+            return PARSE_FAILED;
+        }
+        captured = length_slot;
+        command->address.kind = ADDRESS_STRUCTURE;
         command->address.pattern = command->pattern;
         command->address.pattern_length = captured;
         command->addressed = 1;
@@ -375,12 +501,69 @@ static size_t parse_address(const char *line, size_t position,
     return at;
 }
 
+/* The one address form whose meaning is not a function of the bytes: it
+ * needs the buffer's grammar, so it is resolved here rather than in
+ * address.c. See the note on ADDRESS_STRUCTURE in address.h.
+ *
+ * requires: editor(editor); the command's address is ADDRESS_STRUCTURE;
+ *           *decomposition writable.
+ * ensures:  editor(editor); decomposition(decomposition, spans, bytes) where
+ *           spans are the extents the selector names, and the result is 1;
+ *           or there is no grammar, the selector was malformed, the buffer
+ *           would not parse, or nothing matched, and the result is 0. Every
+ *           failure writes its own reason — which is why the caller does not
+ *           add one.
+ */
+static int resolve_structure(Editor *editor, const Command *command,
+                             Decomposition *decomposition)
+{
+    char       selector[PATTERN_CAPACITY];
+    Structure *loaded;
+    size_t     length;
+    int        found;
+
+    decomposition->count = 0;
+
+    length = command->address.pattern_length;
+    if (length == 0) {
+        write_line("?  {} wants a selector");
+        return 0;
+    }
+    if (length >= PATTERN_CAPACITY) {
+        write_line("?  selector too long");
+        return 0;
+    }
+    memcpy(selector, command->pattern, length);
+    selector[length] = '\0';
+
+    loaded = grammar_for_buffer(editor);
+    if (loaded == NULL) {
+        return 0;
+    }
+
+    found = structure_select(loaded, &editor->text, selector, decomposition);
+    if (found == -2) {
+        write_line("?  that grammar ships no queries/tags.scm; "
+                   "select by node type instead");
+        return 0;
+    }
+    if (found < 0) {
+        write_line("?  could not parse the buffer");
+        return 0;
+    }
+    if (found == 0) {
+        write_line("?  no match");
+        return 0;
+    }
+    return 1;
+}
+
 /* requires: editor(editor); *decomposition writable.
  * ensures:  editor(editor); *decomposition holds the foci the command's
  *           address selects, with ADDRESS_LINE_RANGE's open end resolved
  *           against the buffer, and the result is 1; or 0.
  */
-static int resolve(const Editor *editor, Command *command,
+static int resolve(Editor *editor, Command *command,
                    Decomposition *decomposition)
 {
     AddressKind kind;
@@ -395,6 +578,11 @@ static int resolve(const Editor *editor, Command *command,
 
     kind = command->address.kind;
     last = command->address.last;
+
+    if (kind == ADDRESS_STRUCTURE) {
+        ok = resolve_structure(editor, command, decomposition);
+        return ok;
+    }
 
     if (kind == ADDRESS_LINE_RANGE) {
         if (last == LINE_RANGE_OPEN) {
@@ -815,7 +1003,12 @@ int editor_initialize(Editor *editor)
     line_index_initialize(&editor->index);
     line_index_initialize(&editor->index);
     editor->loop = NULL;
-    editor->structure = NULL;
+    grammar_initialize(&editor->grammars);
+    /* The environment is read once, here, rather than on first use: a `G`
+     * with no argument should be able to show what the session started
+     * with, and a registration made by hand should not be undone by a
+     * later first use re-reading the environment on top of it. */
+    grammar_configure_from_environment(&editor->grammars);
     editor->current = 0;
     index = 0;
     while (index < BUFFER_CAPACITY) {
@@ -850,7 +1043,6 @@ int editor_initialize(Editor *editor)
  */
 void editor_release(Editor *editor)
 {
-    Structure     *loaded;
     size_t         index;
     unsigned char *buffer;
     int            descriptor;
@@ -868,9 +1060,7 @@ void editor_release(Editor *editor)
         }
         index = index + 1;
     }
-    loaded = editor->structure;
-    structure_destroy(loaded);
-    editor->structure = NULL;
+    grammar_release(&editor->grammars);
     pool_release(&editor->pool);
     rope_initialize_empty(&editor->text);
 }
@@ -881,9 +1071,11 @@ void editor_release(Editor *editor)
 int editor_execute(Editor *editor, const char *line)
 {
     Command       command;
+    Replacement   replacement;
     Decomposition foci;
     Decomposition matches;
     Rope          edited;
+    AddressKind   kind;
     char          path[NAME_CAPACITY];
     size_t        position;
     size_t        replacement_length;
@@ -973,6 +1165,17 @@ int editor_execute(Editor *editor, const char *line)
         return ok;
     }
 
+    if (verb == 0x47) {                       /* G  list or register grammars */
+        position = skip_blanks(line, position);
+        value = line[position];
+        if (value == 0x00) {
+            editor_report_grammars(editor);
+            return 1;
+        }
+        ok = editor_register_grammar(editor, line + position);
+        return ok;
+    }
+
     if (verb == 0x62) {                       /* b  list or switch buffers */
         position = skip_blanks(line, position);
         value = line[position];
@@ -1057,9 +1260,15 @@ int editor_execute(Editor *editor, const char *line)
         }
     }
 
+    kind = command.address.kind;
     ok = resolve(editor, &command, &foci);
     if (ok == 0) {
-        write_line("?  no such address");
+        /* A structural address has already said why it failed — it has more
+         * to say than "no such address", since it can also mean there is no
+         * grammar for this buffer. */
+        if (kind != ADDRESS_STRUCTURE) {
+            write_line("?  no such address");
+        }
         return 0;
     }
 
@@ -1113,16 +1322,13 @@ int editor_execute(Editor *editor, const char *line)
 
     if (verb == 'c') {
         position = skip_blanks(line, position);
-        position = read_delimited(line, position, 0x00, command.operand,
-                                  ARGUMENT_CAPACITY, &length_slot);
+        position = read_replacement(line, position, 0x00, &replacement);
         if (position == PARSE_FAILED) {
             write_line("?  replacement too long");
             return 0;
         }
-        replacement_length = length_slot;
-        ok = address_replace_all(&editor->pool, &editor->text, &foci,
-                                 command.operand, replacement_length,
-                                 &edited);
+        ok = address_replace_each(&editor->pool, &editor->text, &foci,
+                                  &replacement, &edited);
         if (ok == 0) {
             write_line("?  out of memory");
             return 0;
@@ -1173,13 +1379,11 @@ int editor_execute(Editor *editor, const char *line)
         }
         pattern_length = length_slot;
 
-        position = read_delimited(line, position, value, command.operand,
-                                  ARGUMENT_CAPACITY, &length_slot);
+        position = read_replacement(line, position, value, &replacement);
         if (position == PARSE_FAILED) {
             write_line("?  replacement too long");
             return 0;
         }
-        replacement_length = length_slot;
         ok = compose_matches(editor, &foci, command.pattern, pattern_length,
                              &matches);
         if (ok == 0) {
@@ -1192,9 +1396,8 @@ int editor_execute(Editor *editor, const char *line)
             return 0;
         }
 
-        ok = address_replace_all(&editor->pool, &editor->text, &matches,
-                                 command.operand, replacement_length,
-                                 &edited);
+        ok = address_replace_each(&editor->pool, &editor->text, &matches,
+                                  &replacement, &edited);
         if (ok == 0) {
             write_line("?  out of memory");
             return 0;
@@ -1626,42 +1829,116 @@ size_t editor_free_buffer(const Editor *editor)
     return BUFFER_CAPACITY;
 }
 
-/* The grammar is loaded on first use, not at startup: most sessions never
- * ask for structure, and a session that does should not have paid for it.
+/* The grammar this buffer's name asks for, loaded on first use.
+ *
+ * Loading is deferred because most sessions never ask for structure, and a
+ * session that asks about one language should not pay for every grammar the
+ * user has configured. Which grammar it is comes from the buffer's name, so
+ * `@1 F` in a Python buffer and `F` in a C one are two different parsers and
+ * neither has to be told.
  *
  * requires: editor(editor).
- * ensures:  editor(editor) with a grammar loaded when one could be found,
- *           and the result is 1; or none is configured or it failed to
- *           load, a reason is written, and the result is 0.
+ * ensures:  editor(editor) with that grammar loaded, and the result points
+ *           at it; or no registration governs this buffer's name, or its
+ *           grammar would not load, a reason is written, and the result is
+ *           null.
  */
-static int ensure_structure(Editor *editor)
+static Structure *grammar_for_buffer(Editor *editor)
 {
+    char        label[NAME_CAPACITY + 64];
     Structure  *loaded;
-    const char *directory;
-    const char *language;
+    const char *name;
+    const char *shown;
+    size_t      count;
+    size_t      index;
+    char        value;
 
-    loaded = editor->structure;
-    if (loaded != NULL) {
-        return 1;
+    name = editor->name;
+    count = grammar_count(&editor->grammars);
+    if (count == 0) {
+        write_line("?  no grammar registered; see G, or set PAPRI_GRAMMARS");
+        return NULL;
     }
 
-    directory = getenv("PAPRI_GRAMMAR");
-    if (directory == NULL) {
-        write_line("?  no grammar; set PAPRI_GRAMMAR to one");
-        return 0;
-    }
-    language = getenv("PAPRI_LANGUAGE");
-    if (language == NULL) {
-        language = "c";
+    index = grammar_lookup(&editor->grammars, name);
+    if (index == count) {
+        shown = name;
+        value = shown[0];
+        if (value == '\0') {
+            shown = "a buffer with no name";
+        }
+        snprintf(label, sizeof(label), "?  no grammar registered for %s",
+                 shown);
+        write_line(label);
+        return NULL;
     }
 
-    loaded = structure_create(directory, language);
+    loaded = grammar_structure_at(&editor->grammars, index);
     if (loaded == NULL) {
-        write_line("?  that grammar would not load");
-        return 0;
+        shown = grammar_directory_at(&editor->grammars, index);
+        snprintf(label, sizeof(label), "?  the grammar at %s would not load",
+                 shown);
+        write_line(label);
+        return NULL;
+    }
+    return loaded;
+}
+
+/* requires: as command.h.
+ * ensures:  as command.h.
+ */
+void editor_report_grammars(const Editor *editor)
+{
+    char        label[GRAMMAR_PATH_CAPACITY + 128];
+    const char *name;
+    const char *suffix;
+    const char *language;
+    const char *directory;
+    FILE       *stream;
+    size_t      count;
+    size_t      index;
+    size_t      current;
+    char        mark;
+
+    stream = stdout;
+    count = grammar_count(&editor->grammars);
+    if (count == 0) {
+        write_line("no grammar registered; see G, or set PAPRI_GRAMMARS");
+        return;
     }
 
-    editor->structure = loaded;
+    name = editor->name;
+    current = grammar_lookup(&editor->grammars, name);
+
+    index = 0;
+    while (index < count) {
+        suffix = grammar_suffix_at(&editor->grammars, index);
+        language = grammar_language_at(&editor->grammars, index);
+        directory = grammar_directory_at(&editor->grammars, index);
+        mark = ' ';
+        if (index == current) {
+            /* The one this buffer's name selects. */
+            mark = '*';
+        }
+        snprintf(label, sizeof(label), "%c%s\t%s\t%s\n", mark, suffix,
+                 language, directory);
+        fputs(label, stream);
+        index = index + 1;
+    }
+}
+
+/* requires: as command.h.
+ * ensures:  as command.h.
+ */
+int editor_register_grammar(Editor *editor, const char *text)
+{
+    int ok;
+
+    ok = grammar_register_line(&editor->grammars, text);
+    if (ok == 0) {
+        write_line("?  G wants SUFFIX LANGUAGE DIRECTORY");
+        return 0;
+    }
     return 1;
 }
 
@@ -1672,15 +1949,18 @@ int editor_list_definitions(Editor *editor)
 {
     Structure *loaded;
     int        found;
-    int        ok;
 
-    ok = ensure_structure(editor);
-    if (ok == 0) {
+    loaded = grammar_for_buffer(editor);
+    if (loaded == NULL) {
         return 0;
     }
 
-    loaded = editor->structure;
     found = structure_list_definitions(loaded, &editor->text);
+    if (found == -2) {
+        write_line("?  that grammar ships no queries/tags.scm; "
+                   "it has no notion of a definition");
+        return 0;
+    }
     if (found < 0) {
         write_line("?  could not parse the buffer");
         return 0;
